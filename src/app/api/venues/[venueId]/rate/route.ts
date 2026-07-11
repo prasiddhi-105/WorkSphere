@@ -3,6 +3,7 @@ import { auth } from "@clerk/nextjs/server";
 import { prisma } from "@/lib/prisma";
 import { ensureUserExists } from "@/lib/auth";
 import { venueRatingSchema, validateRequest } from "@/lib/validations";
+import { updateUserPreferencesSummary } from "@/lib/agents/MemoryAgent";
 
 // POST /api/venues/[venueId]/rate - Add rating
 export async function POST(
@@ -28,7 +29,18 @@ export async function POST(
       return NextResponse.json({ error: validation.error }, { status: 400 });
     }
 
-    const { wifiQuality, hasOutlets, noiseLevel, comment, hasErgonomic, outletDensity, wifiSpeed } = validation.data;
+    const {
+      wifiQuality,
+      hasOutlets,
+      noiseLevel,
+      avgDecibels,
+      peakDecibels,
+      comment,
+      hasErgonomic,
+      outletDensity,
+      wifiSpeed,
+      speedtestPhoto,
+    } = validation.data;
     const { venue: venueData } = body; // venue data for creating new venues
 
     const targetPlaceId = venueData?.placeId || venueId;
@@ -65,10 +77,13 @@ export async function POST(
         wifiQuality,
         hasOutlets,
         noiseLevel,
+        avgDecibels: avgDecibels || null,
+        peakDecibels: peakDecibels || null,
         hasErgonomic,
         outletDensity,
         wifiSpeed,
         comment,
+        speedtestPhoto,
       },
       create: {
         userId,
@@ -76,10 +91,13 @@ export async function POST(
         wifiQuality,
         hasOutlets,
         noiseLevel,
+        avgDecibels: avgDecibels || null,
+        peakDecibels: peakDecibels || null,
         hasErgonomic: hasErgonomic || false,
         outletDensity: outletDensity || "none",
         wifiSpeed: wifiSpeed || null,
         comment,
+        speedtestPhoto,
       },
     });
 
@@ -128,6 +146,11 @@ export async function POST(
         crowdsourced: true,
       },
     });
+
+    // Trigger background preference summary consolidation
+    updateUserPreferencesSummary(userId).catch((err) =>
+      console.error("[RateAPI] Background preference sync failed:", err)
+    );
 
     return NextResponse.json({ rating }, { status: 201 });
   } catch (error) {

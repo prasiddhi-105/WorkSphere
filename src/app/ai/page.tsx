@@ -36,19 +36,21 @@ function AppPage() {
   const [selectedVenue, setSelectedVenue] = useState<MapMarker | null>(null);
   const [isOnline, setIsOnline] = useState(true);
   const [isLoadingLocation, setIsLoadingLocation] = useState(true);
-  
-  const searchParams = useSearchParams();
-  const sessionId = searchParams?.get("session") || null;
+  const [toast, setToast] = useState<{
+    message: string;
+    type: "error" | "warning" | "success";
+  } | null>(null);
 
-  const [toast, setToast] = useState<string | null>(null);
-
-  // Auto-dismiss toast notification after 4 seconds
+  // Auto-dismiss toast after 4 seconds
   useEffect(() => {
     if (toast) {
       const timer = setTimeout(() => setToast(null), 4000);
       return () => clearTimeout(timer);
     }
   }, [toast]);
+
+  const searchParams = useSearchParams();
+  const sessionId = searchParams?.get("session") || null;
 
   // Mobile view state - show map or chat
   const [mobileView, setMobileView] = useState<"map" | "chat">("chat");
@@ -148,7 +150,7 @@ function AppPage() {
             setIsLoadingLocation(false);
           },
           async (error) => {
-            console.error("Geolocation error:", error);
+            console.warn("Geolocation error:", error);
             // Fallback to IP-based location API
             try {
               const response = await fetch("/api/location");
@@ -273,62 +275,38 @@ function AppPage() {
 
       case "route":
         // Handle directions request from chatbot
-        if (update.route) {
-          const fromLat = update.route.from?.lat;
-          const fromLng = update.route.from?.lng;
-          const toLat = update.route.to?.lat;
-          const toLng = update.route.to?.lng;
+        if (update.route && location) {
+          // Fetch real road route using OSRM API
+          (async () => {
+            const { getRoute } = await import('@/lib/routing');
+            const routeData = await getRoute(
+              update.route!.from,
+              update.route!.to,
+              'walking' // can also be 'driving' or 'cycling'
+            );
 
-          if (
-            fromLat == null || fromLng == null ||
-            toLat == null || toLng == null ||
-            isNaN(Number(fromLat)) || isNaN(Number(fromLng)) ||
-            isNaN(Number(toLat)) || isNaN(Number(toLng))
-          ) {
-            setToast("Route directions unavailable for this venue.");
-            if (location) {
-              setMapView({
-                center: { lat: location.latitude, lng: location.longitude },
-                zoom: 14,
-                animate: true,
-              });
-            }
-            break;
-          }
+            const newRoute: MapRoute = {
+              id: `route-${Date.now()}`,
+              path: routeData?.path || [
+                { lat: update.route!.from.lat, lng: update.route!.from.lng },
+                { lat: update.route!.to.lat, lng: update.route!.to.lng },
+              ],
+              distance: routeData?.distance,
+              duration: routeData?.duration,
+              isHighlighted: true,
+            };
+            setRoutes([newRoute]);
 
-          if (location) {
-            // Fetch real road route using OSRM API
-            (async () => {
-              const { getRoute } = await import('@/lib/routing');
-              const routeData = await getRoute(
-                { lat: Number(fromLat), lng: Number(fromLng) },
-                { lat: Number(toLat), lng: Number(toLng) },
-                'walking'
-              );
-
-              const newRoute: MapRoute = {
-                id: `route-${Date.now()}`,
-                path: routeData?.path || [
-                  { lat: Number(fromLat), lng: Number(fromLng) },
-                  { lat: Number(toLat), lng: Number(toLng) },
-                ],
-                distance: routeData?.distance,
-                duration: routeData?.duration,
-                isHighlighted: true,
-              };
-              setRoutes([newRoute]);
-
-              // Center map between user and destination
-              setMapView({
-                center: {
-                  lat: (Number(fromLat) + Number(toLat)) / 2,
-                  lng: (Number(fromLng) + Number(toLng)) / 2,
-                },
-                zoom: 14,
-                animate: true,
-              });
-            })();
-          }
+            // Center map between user and destination
+            setMapView({
+              center: {
+                lat: (update.route!.from.lat + update.route!.to.lat) / 2,
+                lng: (update.route!.from.lng + update.route!.to.lng) / 2,
+              },
+              zoom: 14,
+              animate: true,
+            });
+          })();
         }
         break;
     }
@@ -368,7 +346,7 @@ function AppPage() {
       }
 
       console.log("Rating submitted successfully");
-      alert("✅ Rating submitted! Thank you for helping the community.");
+      alert("Rating submitted! Thank you for helping the community.");
     } catch (error) {
       console.error("Error submitting rating:", error);
       alert("Failed to submit rating. Please try again.");
@@ -473,42 +451,43 @@ function AppPage() {
           md:flex flex-1 md:flex-[3] flex-col min-h-0 bg-white dark:bg-zinc-900
         `}>
           <ChatErrorBoundary>
-            <EnhancedChatbot
-              roomId={sessionId}
-              onMapUpdate={(update) => {
-                handleMapUpdate(update as MapUpdateData);
-                // Auto-switch to map on mobile when markers are added
-                if (update.type === "markers" && update.markers && update.markers.length > 0) {
-                  // Small delay so user sees the results loading
-                  setTimeout(() => setMobileView("map"), 500);
+              <EnhancedChatbot
+                roomId={sessionId}
+                onShowToast={(msg) => setToast({ message: msg, type: "warning" })}
+                onMapUpdate={(update) => {
+                  handleMapUpdate(update as MapUpdateData);
+                  // Auto-switch to map on mobile when markers are added
+                  if (update.type === "markers" && update.markers && update.markers.length > 0) {
+                    // Small delay so user sees the results loading
+                    setTimeout(() => setMobileView("map"), 500);
+                  }
+                }}
+                onOpenDetails={(v) => {
+                  // Map the Venue type from chat to the MapMarker type used here
+                  setSelectedVenue({
+                    id: v.id,
+                    name: v.name,
+                    position: { lat: v.lat, lng: v.lng },
+                    category: v.category || "cafe",
+                    address: v.address,
+                    amenities: {
+                      wifi: v.wifi,
+                      outlets: v.hasOutlets,
+                      quiet: v.noiseLevel === "quiet",
+                      hasErgonomic: v.hasErgonomic,
+                      outletDensity: v.outletDensity,
+                      wifiSpeed: v.wifiSpeed
+                    },
+                    score: v.score
+                  });
+                }}
+                onBook={() => {
+                  // Handled internally by EnhancedChatbot now
+                }}
+                userLocation={
+                  location ? { lat: location.latitude, lng: location.longitude } : undefined
                 }
-              }}
-              onOpenDetails={(v) => {
-                // Map the Venue type from chat to the MapMarker type used here
-                setSelectedVenue({
-                  id: v.id,
-                  name: v.name,
-                  position: { lat: v.lat, lng: v.lng },
-                  category: v.category || "cafe",
-                  address: v.address,
-                  amenities: {
-                    wifi: v.wifi,
-                    outlets: v.hasOutlets,
-                    quiet: v.noiseLevel === "quiet",
-                    hasErgonomic: v.hasErgonomic,
-                    outletDensity: v.outletDensity,
-                    wifiSpeed: v.wifiSpeed
-                  },
-                  score: v.score
-                });
-              }}
-              onBook={(v) => {
-                console.log("[Booking] Initiated for:", v.name);
-              }}
-              userLocation={
-                location ? { lat: location.latitude, lng: location.longitude } : undefined
-              }
-            />
+              />
           </ChatErrorBoundary>
         </div>
       </div>
@@ -562,24 +541,22 @@ function AppPage() {
         onSubmit={handleRatingSubmit}
       />
 
-      {/* Custom Warning Toast */}
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-[9999] max-w-sm">
-          <div className="flex items-center gap-3 px-5 py-4 rounded-2xl bg-zinc-950/90 dark:bg-zinc-950/95 backdrop-blur-md border border-zinc-800 text-zinc-100 shadow-2xl transition-all duration-300">
-            <div className="flex-shrink-0 w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-            <span className="text-xs font-semibold tracking-tight leading-none uppercase tracking-wider">{toast}</span>
-            <button
-              onClick={() => setToast(null)}
-              className="ml-4 text-zinc-500 hover:text-zinc-300 transition-colors"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Offline Indicator */}
       <OfflineIndicator />
+
+      {/* Glassmorphic Toast Warning Card */}
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-[9999] flex items-center gap-3 px-4 py-3 rounded-2xl bg-zinc-950/80 dark:bg-black/80 backdrop-blur-xl border border-white/10 shadow-2xl text-white animate-in slide-in-from-bottom duration-300">
+          <div className="h-2 w-2 rounded-full bg-orange-500 animate-pulse shrink-0" />
+          <p className="text-xs font-bold uppercase tracking-wide">{toast.message}</p>
+          <button 
+            onClick={() => setToast(null)} 
+            className="p-1 rounded-lg hover:bg-white/10 transition-colors ml-2"
+          >
+            <X className="w-4 h-4 text-zinc-400 hover:text-white" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

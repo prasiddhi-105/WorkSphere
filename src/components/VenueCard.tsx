@@ -1,9 +1,10 @@
 "use client";
-
+import { VenueShareButton } from "@/components/social/VenueShareButton";
 import { MapMarker } from "@/types/map";
 import { Star, Wifi, Zap, Volume2, Navigation, Heart, MessageSquare, Clock, ExternalLink, Loader2, TreePine, Accessibility } from "lucide-react";
 import { useState, useEffect } from "react";
 import Image from "next/image";
+import { NoiseTimeChart } from "@/components/noise/NoiseTimeChart";
 
 interface VenueEnrichData {
   found: boolean;
@@ -223,6 +224,11 @@ export function VenueCard({
               📏 {venue.distance}
             </div>
           )}
+          {enrichData?.venueId && (
+  <div className="mt-4">
+    <NoiseTimeChart venueId={enrichData.venueId} />
+  </div>
+)}
         </div>
 
         {/* Actions */}
@@ -251,6 +257,21 @@ export function VenueCard({
               <ExternalLink className="w-4 h-4" />
             </a>
           )}
+          {enrichData?.venueId && (
+  <VenueShareButton
+    venueId={enrichData.venueId}
+    venueName={venue.name}
+  />
+)}
+
+{enrichData?.venueId && (
+  <a
+    href={`/reserve/${enrichData.venueId}`}
+    className="rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white hover:bg-violet-500"
+  >
+    Reserve desk
+  </a>
+)}
         </div>
       </div>
     </div>
