@@ -4,6 +4,7 @@ import Groq from "groq-sdk";
 import { rateLimit, getRateLimitInfo } from "@/lib/rateLimit";
 import { chatRequestSchema, validateRequest } from "@/lib/validations";
 import { checkSemanticCache, setSemanticCache } from "@/lib/cache/semanticCache";
+import { extractAndStoreMemories, updateUserPreferencesSummary } from "@/lib/agents/MemoryAgent";
 
 export const maxDuration = 60;
 
@@ -105,39 +106,47 @@ async function contextAgent(
   reasoning: string;
 }> {
   let memoryContext = "";
-  if (userId && process.env.COHERE_API_KEY) {
+  if (userId) {
     try {
-      const embedRes = await fetch('https://api.cohere.ai/v1/embed', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.COHERE_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          texts: [userMessage],
-          model: 'embed-english-v3.0',
-          input_type: 'search_query',
-        }),
+      const dbUser = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { preferencesSummary: true }
       });
-
-      if (!embedRes.ok) {
-        throw new Error(`Cohere API error: ${embedRes.statusText}`);
+      if (dbUser?.preferencesSummary) {
+        memoryContext += `\n\nUSER PROFILE PREFERENCES SUMMARY (Must be considered): ${dbUser.preferencesSummary}`;
       }
 
-      const embedData = await embedRes.json();
-      const embedding = embedData.embeddings[0];
-      const embeddingString = `[${embedding.join(',')}]`;
+      if (process.env.COHERE_API_KEY) {
+        const embedRes = await fetch('https://api.cohere.ai/v1/embed', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.COHERE_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            texts: [userMessage],
+            model: 'embed-english-v3.0',
+            input_type: 'search_query',
+          }),
+        });
 
-      const memories: any[] = await prisma.$queryRawUnsafe(`
-        SELECT content, 1 - (embedding <=> $1::vector) AS similarity
-        FROM "UserMemory"
-        WHERE "userId" = $2
-        ORDER BY embedding <=> $1::vector
-        LIMIT 3
-      `, embeddingString, userId);
+        if (embedRes.ok) {
+          const embedData = await embedRes.json();
+          const embedding = embedData.embeddings[0];
+          const embeddingString = `[${embedding.join(',')}]`;
 
-      if (memories.length > 0) {
-        memoryContext = "\\n\\nKNOWN USER PREFERENCES (Must be considered):\\n" + memories.map(m => `- ${m.content}`).join("\\n");
+          const memories: any[] = await prisma.$queryRawUnsafe(`
+            SELECT content, 1 - (embedding <=> $1::vector) AS similarity
+            FROM "UserMemory"
+            WHERE "userId" = $2
+            ORDER BY embedding <=> $1::vector
+            LIMIT 3
+          `, embeddingString, userId);
+
+          if (memories.length > 0) {
+            memoryContext += "\n\nRECENT SEMANTIC USER MEMORIES:\n" + memories.map(m => `- ${m.content}`).join("\n");
+          }
+        }
       }
     } catch (e) {
       console.error('Error fetching AI memories:', e);
@@ -206,7 +215,7 @@ async function dataAgent(
   }
 ): Promise<{
   venues: any[];
-  meta: { total: number; source: string };
+  meta: { total: number; source: string; highTraffic?: boolean };
   reasoning: string;
 }> {
   const { location, radius = 2000, category: _category = ["all"] } = params;
@@ -240,6 +249,8 @@ async function dataAgent(
     "https://lz4.overpass-api.de/api/interpreter",
   ];
 
+  let overpassFailed = true;
+
   for (const endpoint of endpoints) {
     try {
       const response = await fetch(endpoint, {
@@ -250,6 +261,7 @@ async function dataAgent(
 
       if (!response.ok) continue;
       const data = await response.json();
+      overpassFailed = false;
 
       let venues = data.elements.slice(0, 15).map((el: any) => {
         const hasErgonomic = el.tags?.office === "coworking" || el.tags?.ergonomic === "yes" || el.tags?.standing_desk === "yes" || el.tags?.backrest === "yes" || el.tags?.amenity === "coworking_space";
@@ -418,7 +430,7 @@ async function dataAgent(
 
   return {
     venues: filteredMock,
-    meta: { total: filteredMock.length, source: "Simulation Fallback" },
+    meta: { total: filteredMock.length, source: "Simulation Fallback", highTraffic: overpassFailed },
     reasoning: `Returned ${filteredMock.length} simulated fallback venues due to Overpass API offline status`,
   };
 }
@@ -593,9 +605,10 @@ function reasoningAgent(
 
     // Extra bonus for explicitly-requested features
     let amenityBonus = 0;
-    if (amenities.includes("wifi") && wifiScore >= 6) amenityBonus += 1;
-    if (amenities.includes("quiet") && venue.noiseLevel === "quiet") amenityBonus += 1;
-    if (amenities.includes("outlets") && venue.hasOutlets) amenityBonus += 1;
+    const safeAmenities = amenities || [];
+    if (safeAmenities.includes("wifi") && wifiScore >= 6) amenityBonus += 1;
+    if (safeAmenities.includes("quiet") && venue.noiseLevel === "quiet") amenityBonus += 1;
+    if (safeAmenities.includes("outlets") && venue.hasOutlets) amenityBonus += 1;
 
     const totalScore =
       wifiScore * w.wifi +
@@ -732,12 +745,13 @@ export async function POST(req: Request) {
 
     // If general conversation, respond directly
     if (orchestratorResult.skipAgents) {
-      const response = await getGroqClient().chat.completions.create({
+      const responseStream = await getGroqClient().chat.completions.create({
         model: "llama-3.3-70b-versatile",
+        stream: true,
         messages: [
           {
             role: "system",
-            content: "You are WorkHub AI, a friendly assistant for finding workspaces. Be helpful and conversational.",
+            content: "You are WorkHub AI, a friendly assistant for finding workspaces. Be helpful and conversational. When appropriate to show data, output <ui-component name=\"DataTable\" props='{\"columns\": [...], \"data\": [...]}' /> or <ui-component name=\"Map\" props='{\"markers\": [...]}' />.",
           },
           ...messages.map((m: any) => ({ 
             role: m.role, 
@@ -746,12 +760,56 @@ export async function POST(req: Request) {
         ],
       });
 
-      return Response.json({
-        content: response.choices[0]?.message?.content || "Hello! How can I help you find a workspace today?",
-        agentSteps,
-        venues: [],
-        cached: false,
+      const stream = new ReadableStream({
+        async start(controller) {
+          const metadata = {
+            venues: [],
+            agentSteps,
+            cached: false,
+            suggestions: [],
+            complexity: orchestratorResult.complexity,
+          };
+          controller.enqueue(new TextEncoder().encode(`METADATA:${JSON.stringify(metadata)}\n\n`));
+
+          let fullContent = "";
+          try {
+            for await (const chunk of responseStream) {
+              const text = chunk.choices[0]?.delta?.content || "";
+              if (text) {
+                fullContent += text;
+                controller.enqueue(new TextEncoder().encode(`TEXT:${text}`));
+              }
+            }
+          } catch(e) {
+            console.error("Stream error:", e);
+          }
+          
+          if (userId && conversationId) {
+            try {
+              await prisma.message.create({
+                data: { conversationId, role: "user", content: userMessage },
+              });
+              await prisma.message.create({
+                data: { conversationId, role: "assistant", content: fullContent, agentName: "GeneralChat" },
+              });
+              await prisma.conversation.update({
+                where: { id: conversationId },
+                data: { updatedAt: new Date() },
+              });
+
+              // Trigger background preference learning & summary updates
+              extractAndStoreMemories(conversationId)
+                .then(() => updateUserPreferencesSummary(userId))
+                .catch((err) => console.error("[GeneralChat] Background preference sync failed:", err));
+            } catch (dbError) {
+              console.error("Database save error:", dbError);
+            }
+          }
+          
+          controller.close();
+        }
       });
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
     }
 
     // ====== CACHE & ROUTING ======
@@ -924,34 +982,83 @@ export async function POST(req: Request) {
       latencyMs: Date.now() - actionStart,
     });
 
-    // ====== SAVE TO DATABASE (if user is authenticated) ======
-    try {
-      const { userId } = await auth();
-      if (userId && conversationId) {
-        await prisma.message.create({
-          data: { conversationId, role: "user", content: userMessage },
-        });
-        await prisma.message.create({
-          data: { conversationId, role: "assistant", content: actionResult.message, agentName: "ActionAgent" },
-        });
-        await prisma.conversation.update({
-          where: { id: conversationId },
-          data: { updatedAt: new Date() },
-        });
-      }
-    } catch (dbError) {
-      console.error("Database save error:", dbError);
-    }
+    // ====== GENERATE STREAM RESPONSE ======
+    const groq = getGroqClient();
+    const systemPrompt = `You are WorkHub AI, a helpful workspace assistant. 
+You can use Generative UI. When you need to show a map, use:
+<ui-component name="Map" props='{"markers": [{"lat": ..., "lng": ..., "name": "...", "category": "..."}]}' />
+When you need to show a table, use:
+<ui-component name="DataTable" props='{"columns": ["Name", "Category", "Score"], "data": [{"Name": "...", "Category": "...", "Score": "..."}]}' />
+Here are the top venues found: ${JSON.stringify(reasoningResult.rankedVenues.map((v:any)=>({name: v.name, category: v.category, lat: v.lat, lng: v.lng, score: v.score})))}
+Address the user's query and include UI components if helpful.`;
 
-    return Response.json({
-      content: actionResult.message,
-      venues: reasoningResult.rankedVenues,
-      mapUpdates: actionResult.mapUpdates,
-      suggestions: actionResult.suggestions,
-      agentSteps,
-      cached: isCached,
-      complexity: orchestratorResult.complexity,
+    const llmMessages = [
+      { role: "system", content: systemPrompt },
+      ...messages.map((m: any) => ({ 
+        role: m.role, 
+        content: m.name ? `[User: ${m.name}] ${m.content}` : m.content 
+      })),
+    ];
+
+    const responseStream = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      stream: true,
+      messages: llmMessages as any,
     });
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const metadata = {
+          venues: reasoningResult.rankedVenues,
+          mapUpdates: actionResult.mapUpdates,
+          suggestions: actionResult.suggestions,
+          agentSteps,
+          cached: isCached,
+          complexity: orchestratorResult.complexity,
+          highTraffic: dataResult?.meta?.highTraffic || false,
+        };
+        controller.enqueue(new TextEncoder().encode(`METADATA:${JSON.stringify(metadata)}\n\n`));
+
+        let fullContent = "";
+        try {
+          for await (const chunk of responseStream) {
+            const text = chunk.choices[0]?.delta?.content || "";
+            if (text) {
+              fullContent += text;
+              controller.enqueue(new TextEncoder().encode(`TEXT:${text}`));
+            }
+          }
+        } catch(e) {
+          console.error("Stream error", e);
+        }
+        
+        if (userId && conversationId) {
+          try {
+            await prisma.message.create({
+              data: { conversationId, role: "user", content: userMessage },
+            });
+            await prisma.message.create({
+              data: { conversationId, role: "assistant", content: fullContent, agentName: "ActionAgent" },
+            });
+            await prisma.conversation.update({
+              where: { id: conversationId },
+              data: { updatedAt: new Date() },
+            });
+
+            // Trigger background preference learning & summary updates
+            extractAndStoreMemories(conversationId)
+              .then(() => updateUserPreferencesSummary(userId))
+              .catch((err) => console.error("[ActionAgent] Background preference sync failed:", err));
+          } catch (dbError) {
+            console.error("Database save error:", dbError);
+          }
+        }
+        
+        controller.close();
+      }
+    });
+
+    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
   } catch (error) {
     console.error("Chat API error:", error);
     return Response.json(

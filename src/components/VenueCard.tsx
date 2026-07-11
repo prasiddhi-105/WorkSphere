@@ -1,9 +1,10 @@
 "use client";
-
+import { VenueShareButton } from "@/components/social/VenueShareButton";
 import { MapMarker } from "@/types/map";
 import { Star, Wifi, Zap, Volume2, Navigation, Heart, MessageSquare, Clock, ExternalLink, Loader2, TreePine, Accessibility, AlertTriangle } from "lucide-react";
 import { useState, useEffect } from "react";
 import Image from "next/image";
+import { NoiseTimeChart } from "@/components/noise/NoiseTimeChart";
 
 interface VenueEnrichData {
   found: boolean;
@@ -252,6 +253,7 @@ export function VenueCard({
           </div>
         )}
 
+
         {/* INTERACTIVE AMENITY VERIFICATION TAG TRACKING ROW */}
         <div className="flex flex-col gap-2 mb-4 border-t border-zinc-100 dark:border-zinc-800 pt-3">
           <span className="text-[10px] font-bold text-zinc-400 tracking-wider uppercase">Verify Amenities:</span>
@@ -307,6 +309,46 @@ export function VenueCard({
               </div>
             )}
           </div>
+
+        {/* Amenities */}
+        <div className="flex flex-wrap gap-2 mb-4">
+          {venue.wifiQuality && venue.wifiQuality >= 3 && (
+            <div className="flex items-center gap-1 text-xs text-zinc-700 dark:text-zinc-300">
+              <Wifi className="w-4 h-4 text-blue-600" />
+              <span>WiFi {venue.wifiQuality}/5</span>
+            </div>
+          )}
+          {venue.hasOutlets && (
+            <div className="flex items-center gap-1 text-xs text-zinc-700 dark:text-zinc-300">
+              <Zap className="w-4 h-4 text-yellow-600" />
+              <span>Outlets</span>
+            </div>
+          )}
+          {venue.noiseLevel && (
+            <div className="flex items-center gap-1 text-xs text-zinc-700 dark:text-zinc-300">
+              <Volume2
+                className={`w-4 h-4 ${
+                  venue.noiseLevel === "quiet"
+                    ? "text-green-600"
+                    : venue.noiseLevel === "moderate"
+                    ? "text-orange-600"
+                    : "text-red-600"
+                }`}
+              />
+              <span className="capitalize">{venue.noiseLevel}</span>
+            </div>
+          )}
+          {venue.distance && (
+            <div className="text-xs text-zinc-600 dark:text-zinc-400">
+              📏 {venue.distance}
+            </div>
+          )}
+          {enrichData?.venueId && (
+  <div className="mt-4">
+    <NoiseTimeChart venueId={enrichData.venueId} />
+  </div>
+)}
+
         </div>
 
         {/* Actions */}
@@ -335,6 +377,21 @@ export function VenueCard({
               <ExternalLink className="w-4 h-4" />
             </a>
           )}
+          {enrichData?.venueId && (
+  <VenueShareButton
+    venueId={enrichData.venueId}
+    venueName={venue.name}
+  />
+)}
+
+{enrichData?.venueId && (
+  <a
+    href={`/reserve/${enrichData.venueId}`}
+    className="rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white hover:bg-violet-500"
+  >
+    Reserve desk
+  </a>
+)}
         </div>
       </div>
     </div>
