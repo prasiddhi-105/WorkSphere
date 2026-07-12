@@ -5,7 +5,11 @@ import * as Y from "yjs";
 export default class WorkspaceServer implements Party.Server {
   constructor(readonly room: Party.Room) {}
 
+
   onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
+
+  onConnect(conn: Party.Connection, __ctx: Party.ConnectionContext) {
+
     // Yjs connection for shared state (messages, markers)
     onConnect(conn, this.room, {
       gc: true,
