@@ -23,33 +23,19 @@ model User {
   memories           UserMemory[]
   crdtState          Bytes?
   preferencesSummary String?
-<<<<<<< HEAD
-  createdVenues  Venue[]            @relation("VenueCreator")
-  workStatus     WorkBuddyStatus?
-  hostedSessions CoworkingSession[] @relation("SessionHost")
-  sessionRsvps   SessionRsvp[]
-  isAdmin        Boolean            @default(false)
-  flagsReported  FlaggedItem[]
-  adminAuditLogs AdminAuditLog[]
-  ownedFolders   Folder[]           @relation("FolderOwner")
-  folderMemberships FolderMember[]  @relation("FolderMembership")
-  addedFolderVenues FolderVenue[]   @relation("FolderVenueAdder")
+createdVenues     Venue[]            @relation("VenueCreator")
+  workStatus        WorkBuddyStatus?
+  hostedSessions    CoworkingSession[] @relation("SessionHost")
+  sessionRsvps      SessionRsvp[]
+  isAdmin           Boolean            @default(false)
+  flagsReported     FlaggedItem[]
+  adminAuditLogs    AdminAuditLog[]
+  ownedFolders      Folder[]           @relation("FolderOwner")
+  folderMemberships FolderMember[]     @relation("FolderMembership")
+  addedFolderVenues FolderVenue[]      @relation("FolderVenueAdder")
   webhookEndpoints  WebhookEndpoint[]
   phoneNumber       String?
   smsAlertsEnabled  Boolean            @default(false)
-=======
-  createdVenues      Venue[]            @relation("VenueCreator")
-  workStatus         WorkBuddyStatus?
-  hostedSessions     CoworkingSession[] @relation("SessionHost")
-  sessionRsvps       SessionRsvp[]
-  isAdmin            Boolean            @default(false)
-  flagsReported      FlaggedItem[]
-  adminAuditLogs     AdminAuditLog[]
-  ownedFolders       Folder[]           @relation("FolderOwner")
-  folderMemberships  FolderMember[]     @relation("FolderMembership")
-  addedFolderVenues  FolderVenue[]      @relation("FolderVenueAdder")
-  webhookEndpoints   WebhookEndpoint[]
->>>>>>> cb03d98 (feat: add coffee quality filter support)
 }
 
 model Venue {
