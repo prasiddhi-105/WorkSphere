@@ -592,7 +592,7 @@ export function EnhancedChatbot({ onMapUpdate, onOpenDetails, onBook, userLocati
 
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div className="flex h-full flex-col bg-white dark:bg-zinc-950 relative overflow-hidden">
+  <div className="flex h-full flex-col min-h-0 bg-white dark:bg-zinc-950 relative overflow-hidden">
       {/* Remote Cursors */}
       <AnimatePresence>
         {Object.values(cursors).map(cursor => (
