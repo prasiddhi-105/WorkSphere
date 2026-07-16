@@ -54,6 +54,14 @@ interface MemEntry {
 const memStore = new Map<string, MemEntry>();
 const WINDOW_MS = 60_000;
 
+interface RateLimitInfo {
+  count: number;
+  remaining: number;
+  resetTime: number;
+  isLimited: boolean;
+}
+const rateLimitInfoStore = new Map<string, RateLimitInfo>();
+
 function memRateLimit(identifier: string, limit: number): boolean {
   const now = Date.now();
 
@@ -119,7 +127,13 @@ export async function rateLimit(
   }
 
   if (rl) {
-    const { success } = await rl.limit(identifier);
+    const { success, remaining, reset } = await rl.limit(identifier);
+    rateLimitInfoStore.set(identifier, {
+      count: limit - remaining,
+      remaining,
+      resetTime: reset,
+      isLimited: !success
+    });
     return success;
   }
 
