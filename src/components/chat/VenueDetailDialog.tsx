@@ -8,6 +8,7 @@ import {
   Wifi,
   Loader2,
   Zap,
+  Bookmark,
   Volume2,
   Navigation,
   Heart,
@@ -174,6 +175,63 @@ export function VenueDetailDialog({
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
   const [wifiPredictions, setWifiPredictions] = useState<any[]>([]);
   const [occupancyData, setOccupancyData] = useState<any[]>([]);
+
+  // Quick Save state
+  const [quickSaveLoading, setQuickSaveLoading] = useState(false);
+
+  const handleQuickSave = async () => {
+    if (quickSaveLoading || !venue) return;
+    setQuickSaveLoading(true);
+    try {
+      const res = await fetch("/api/folders");
+      if (!res.ok) {
+        alert("Failed to save venue. Unable to load collections.");
+        setQuickSaveLoading(false);
+        return;
+      }
+      const data = await res.json();
+      if (!data.folders || data.folders.length === 0) {
+        alert(
+          "You don't have any collections yet. Please create one to save venues.",
+        );
+        setQuickSaveLoading(false);
+        return;
+      }
+
+      const primaryFolder = data.folders[0];
+      const saveRes = await fetch(`/api/folders/${primaryFolder.id}/venues`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ venue }),
+      });
+
+      if (saveRes.ok) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+        await fetch(`/api/folders/${primaryFolder.id}/refresh`, {
+          method: "POST",
+          signal: controller.signal,
+        })
+          .catch(() => {})
+          .finally(() => clearTimeout(timeoutId));
+        alert(`Saved to ${primaryFolder.name}!`);
+      } else {
+        const errorData = await saveRes.json().catch(() => ({}));
+        if (errorData.error === "Venue already in folder") {
+          alert("Already saved to this collection");
+        } else {
+          alert(
+            "Failed to save venue. It might already be in your collection.",
+          );
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      alert("An error occurred while saving the venue.");
+    } finally {
+      setQuickSaveLoading(false);
+    }
+  };
 
   // Menu translation states
   const [ocrCache, setOcrCache] = useState<Record<string, string>>({});
@@ -731,12 +789,27 @@ export function VenueDetailDialog({
           )}
           <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-zinc-950/20 to-transparent" />
 
-          <button
-            onClick={onClose}
-            className="absolute top-4 right-4 p-3 bg-white hover:bg-zinc-100 text-black rounded-full shadow-2xl border border-zinc-200 transition-all font-bold active:scale-90"
-          >
-            <X className="w-6 h-6" />
-          </button>
+          <div className="absolute top-4 right-4 flex gap-2">
+            <button
+              onClick={handleQuickSave}
+              disabled={quickSaveLoading}
+              className="p-3 bg-white hover:bg-zinc-100 text-black rounded-full shadow-2xl border border-zinc-200 transition-all font-bold active:scale-90 flex items-center justify-center disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+              title="Quick Save"
+              aria-label="Quick Save"
+            >
+              {quickSaveLoading ? (
+                <Loader2 className="w-6 h-6 animate-spin text-blue-500" />
+              ) : (
+                <Bookmark className="w-6 h-6 text-blue-600" />
+              )}
+            </button>
+            <button
+              onClick={onClose}
+              className="p-3 bg-white hover:bg-zinc-100 text-black rounded-full shadow-2xl border border-zinc-200 transition-all font-bold active:scale-90"
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
 
           <div className="absolute bottom-6 left-6 right-6">
             <div className="flex items-center gap-2 mb-2">
