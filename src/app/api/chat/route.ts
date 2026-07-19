@@ -2,8 +2,12 @@ import { prisma } from "@/lib/prisma";
 import { auth } from "@clerk/nextjs/server";
 import Groq from "groq-sdk";
 import { rateLimit, getRateLimitInfo } from "@/lib/rateLimit";
+import { triggerBackgroundMemorySync } from "@/lib/backgroundSync";
 import { chatRequestSchema, validateRequest } from "@/lib/validations";
-import { checkSemanticCache, setSemanticCache } from "@/lib/cache/semanticCache";
+import {
+  checkSemanticCache,
+  setSemanticCache,
+} from "@/lib/cache/semanticCache";
 
 export const maxDuration = 60;
 
@@ -12,7 +16,13 @@ let groq: Groq | null = null;
 function getGroqClient(): Groq {
   if (!groq) {
     groq = new Groq({
-      apiKey: process.env.GROQ_API_KEY || '',
+      apiKey: process.env.GROQ_API_KEY || "",
+      // Explicit bounds so sustained rate-limit exhaustion (HTTP 429)
+      // fails fast with a catchable error instead of the SDK's default
+      // internal retry behavior hanging the request indefinitely,
+      // which was surfacing as an infinite loading state on the client.
+      maxRetries: 2,
+      timeout: 20000, // 20s
     });
   }
   return groq;
@@ -23,7 +33,7 @@ function getGroqClient(): Groq {
 // ============================================================
 async function orchestratorAgent(
   userMessage: string,
-  context?: any
+  context?: any,
 ): Promise<{
   agentsToUse: string[];
   reasoning: string;
@@ -63,7 +73,10 @@ For general chat: {"skipAgents": true, "reasoning": "General conversation"}`;
       model: "llama-3.3-70b-versatile",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `User message: "${userMessage}"\nContext: ${context ? JSON.stringify(context) : "None"}\nNote: This is a multiplayer session.` },
+        {
+          role: "user",
+          content: `User message: "${userMessage}"\nContext: ${context ? JSON.stringify(context) : "None"}\nNote: This is a multiplayer session.`,
+        },
       ],
       temperature: 0.3,
     });
@@ -90,7 +103,7 @@ For general chat: {"skipAgents": true, "reasoning": "General conversation"}`;
 async function contextAgent(
   userMessage: string,
   userLocation?: { lat: number; lng: number },
-  userId?: string | null
+  userId?: string | null,
 ): Promise<{
   intent: string;
   parameters: {
@@ -105,42 +118,56 @@ async function contextAgent(
   reasoning: string;
 }> {
   let memoryContext = "";
-  if (userId && process.env.COHERE_API_KEY) {
+  if (userId) {
     try {
-      const embedRes = await fetch('https://api.cohere.ai/v1/embed', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.COHERE_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          texts: [userMessage],
-          model: 'embed-english-v3.0',
-          input_type: 'search_query',
-        }),
+      const dbUser = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { preferencesSummary: true },
       });
-
-      if (!embedRes.ok) {
-        throw new Error(`Cohere API error: ${embedRes.statusText}`);
+      if (dbUser?.preferencesSummary) {
+        memoryContext += `\n\nUSER PROFILE PREFERENCES SUMMARY (Must be considered): ${dbUser.preferencesSummary}`;
       }
 
-      const embedData = await embedRes.json();
-      const embedding = embedData.embeddings[0];
-      const embeddingString = `[${embedding.join(',')}]`;
+      if (process.env.COHERE_API_KEY) {
+        const embedRes = await fetch("https://api.cohere.ai/v1/embed", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.COHERE_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            texts: [userMessage],
+            model: "embed-english-v3.0",
+            input_type: "search_query",
+          }),
+        });
 
-      const memories: any[] = await prisma.$queryRawUnsafe(`
-        SELECT content, 1 - (embedding <=> $1::vector) AS similarity
-        FROM "UserMemory"
-        WHERE "userId" = $2
-        ORDER BY embedding <=> $1::vector
-        LIMIT 3
-      `, embeddingString, userId);
+        if (embedRes.ok) {
+          const embedData = await embedRes.json();
+          const embedding = embedData.embeddings[0];
+          const embeddingString = `[${embedding.join(",")}]`;
 
-      if (memories.length > 0) {
-        memoryContext = "\\n\\nKNOWN USER PREFERENCES (Must be considered):\\n" + memories.map(m => `- ${m.content}`).join("\\n");
+          const memories: any[] = await prisma.$queryRawUnsafe(
+            `
+            SELECT content, 1 - (embedding <=> $1::vector) AS similarity
+            FROM "UserMemory"
+            WHERE "userId" = $2
+            ORDER BY embedding <=> $1::vector
+            LIMIT 3
+          `,
+            embeddingString,
+            userId,
+          );
+
+          if (memories.length > 0) {
+            memoryContext +=
+              "\n\nRECENT SEMANTIC USER MEMORIES:\n" +
+              memories.map((m) => `- ${m.content}`).join("\n");
+          }
+        }
       }
     } catch (e) {
-      console.error('Error fetching AI memories:', e);
+      console.error("Error fetching AI memories:", e);
     }
   }
 
@@ -162,7 +189,10 @@ Output ONLY valid JSON:
       model: "llama-3.3-70b-versatile",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `Message: "${userMessage}"\nLocation: ${userLocation ? `${userLocation.lat}, ${userLocation.lng}` : "unknown"}` },
+        {
+          role: "user",
+          content: `Message: "${userMessage}"\nLocation: ${userLocation ? `${userLocation.lat}, ${userLocation.lng}` : "unknown"}`,
+        },
       ],
       temperature: 0.4,
     });
@@ -203,10 +233,18 @@ async function dataAgent(
     ergonomic?: boolean;
     outletDensity?: string;
     wifiSpeedBand?: string;
-  }
+    hasPhoneBooths?: boolean;
+    hasNoMusic?: boolean;
+    hasQuietZone?: boolean;
+    singleOriginBeans?: boolean;
+    specialtyEspresso?: boolean;
+    oatAlmondMilk?: boolean;
+    pourOverAvailable?: boolean;
+    musicStyle?: string;
+  },
 ): Promise<{
   venues: any[];
-  meta: { total: number; source: string };
+  meta: { total: number; source: string; highTraffic?: boolean };
   reasoning: string;
 }> {
   const { location, radius = 2000, category: _category = ["all"] } = params;
@@ -240,21 +278,37 @@ async function dataAgent(
     "https://lz4.overpass-api.de/api/interpreter",
   ];
 
+  let overpassFailed = true;
+
   for (const endpoint of endpoints) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 10000);
     try {
       const response = await fetch(endpoint, {
         method: "POST",
         body: `data=${encodeURIComponent(query)}`,
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        signal: controller.signal,
       });
 
       if (!response.ok) continue;
       const data = await response.json();
+      overpassFailed = false;
 
       let venues = data.elements.slice(0, 15).map((el: any) => {
-        const hasErgonomic = el.tags?.office === "coworking" || el.tags?.ergonomic === "yes" || el.tags?.standing_desk === "yes" || el.tags?.backrest === "yes" || el.tags?.amenity === "coworking_space";
+        const hasErgonomic =
+          el.tags?.office === "coworking" ||
+          el.tags?.ergonomic === "yes" ||
+          el.tags?.standing_desk === "yes" ||
+          el.tags?.backrest === "yes" ||
+          el.tags?.amenity === "coworking_space";
         let wifiSpeed: number | null = null;
-        const speedTag = el.tags?.["internet_access:speed"] || el.tags?.["download:speed"];
+        const speedTag =
+          el.tags?.["internet_access:speed"] || el.tags?.["download:speed"];
         if (speedTag) {
           const match = speedTag.match(/\d+/);
           if (match) {
@@ -263,7 +317,11 @@ async function dataAgent(
         }
 
         let outletDensity = "none";
-        if (el.tags?.socket === "yes" || el.tags?.["socket:count"] || el.tags?.["power:outlet"] === "yes") {
+        if (
+          el.tags?.socket === "yes" ||
+          el.tags?.["socket:count"] ||
+          el.tags?.["power:outlet"] === "yes"
+        ) {
           outletDensity = "some_tables";
           const count = parseInt(el.tags?.["socket:count"] || "0", 10);
           if (count > 10) {
@@ -284,8 +342,15 @@ async function dataAgent(
           address: el.tags?.["addr:street"]
             ? `${el.tags["addr:housenumber"] || ""} ${el.tags["addr:street"]}`.trim()
             : null,
-          wifi: el.tags?.internet_access === "wlan" || el.tags?.internet_access === "yes",
-          hasOutlets: el.tags?.socket === "yes" || el.tags?.["socket:count"] || el.tags?.internet_access ? true : false,
+          wifi:
+            el.tags?.internet_access === "wlan" ||
+            el.tags?.internet_access === "yes",
+          hasOutlets:
+            el.tags?.socket === "yes" ||
+            el.tags?.["socket:count"] ||
+            el.tags?.internet_access
+              ? true
+              : false,
           noiseLevel: el.tags?.amenity === "library" ? "quiet" : "moderate",
           rating: null,
           wifiQuality: el.tags?.internet_access ? 3 : null,
@@ -293,6 +358,13 @@ async function dataAgent(
           hasErgonomic,
           outletDensity,
           wifiSpeed,
+          hasPhoneBooths: false,
+          hasNoMusic: false,
+          hasQuietZone: false,
+          singleOriginBeans: false,
+          specialtyEspresso: false,
+          oatAlmondMilk: false,
+          pourOverAvailable: false,
         };
       });
 
@@ -300,24 +372,68 @@ async function dataAgent(
       if (filters) {
         if (filters.wifi) venues = venues.filter((v: any) => v.wifi);
         if (filters.outlets) venues = venues.filter((v: any) => v.hasOutlets);
-        if (filters.quiet) venues = venues.filter((v: any) => v.noiseLevel === "quiet");
-        if (filters.ergonomic) venues = venues.filter((v: any) => v.hasErgonomic);
+        if (filters.quiet)
+          venues = venues.filter((v: any) => v.noiseLevel === "quiet");
+        if (filters.ergonomic)
+          venues = venues.filter((v: any) => v.hasErgonomic);
         if (filters.outletDensity && filters.outletDensity !== "none") {
           if (filters.outletDensity === "every_table") {
-            venues = venues.filter((v: any) => v.outletDensity === "every_table");
+            venues = venues.filter(
+              (v: any) => v.outletDensity === "every_table",
+            );
           } else if (filters.outletDensity === "some_tables") {
-            venues = venues.filter((v: any) => ["every_table", "some_tables"].includes(v.outletDensity));
+            venues = venues.filter((v: any) =>
+              ["every_table", "some_tables"].includes(v.outletDensity),
+            );
           } else if (filters.outletDensity === "wall_seats") {
-            venues = venues.filter((v: any) => ["every_table", "some_tables", "wall_seats"].includes(v.outletDensity));
+            venues = venues.filter((v: any) =>
+              ["every_table", "some_tables", "wall_seats"].includes(
+                v.outletDensity,
+              ),
+            );
           }
         }
         if (filters.wifiSpeedBand && filters.wifiSpeedBand !== "all") {
           if (filters.wifiSpeedBand === "basic") {
-            venues = venues.filter((v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 10);
+            venues = venues.filter(
+              (v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 10,
+            );
           } else if (filters.wifiSpeedBand === "fast") {
-            venues = venues.filter((v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 50);
+            venues = venues.filter(
+              (v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 50,
+            );
           } else if (filters.wifiSpeedBand === "ultra") {
-            venues = venues.filter((v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 100);
+            venues = venues.filter(
+              (v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 100,
+            );
+          }
+        }
+        if (filters.hasPhoneBooths)
+          venues = venues.filter((v: any) => v.hasPhoneBooths);
+        if (filters.singleOriginBeans)
+          venues = venues.filter((v: any) => v.singleOriginBeans);
+
+        if (filters.specialtyEspresso)
+          venues = venues.filter((v: any) => v.specialtyEspresso);
+
+        if (filters.oatAlmondMilk)
+          venues = venues.filter((v: any) => v.oatAlmondMilk);
+
+        if (filters.pourOverAvailable)
+          venues = venues.filter((v: any) => v.pourOverAvailable);
+        if (filters.hasNoMusic)
+          venues = venues.filter((v: any) => v.hasNoMusic);
+        if (filters.hasQuietZone)
+          venues = venues.filter((v: any) => v.hasQuietZone);
+        if (filters.musicStyle && filters.musicStyle !== "all") {
+          if (filters.musicStyle === "no_music") {
+            venues = venues.filter(
+              (v: any) => v.musicStyle === "no_music" || v.hasNoMusic,
+            );
+          } else {
+            venues = venues.filter(
+              (v: any) => v.musicStyle === filters.musicStyle,
+            );
           }
         }
       }
@@ -328,8 +444,16 @@ async function dataAgent(
         reasoning: `Found ${venues.length} venues within ${radius}m`,
       };
     } catch (error) {
-      console.error("Data agent error:", error);
+      if (error instanceof Error && error.name === "AbortError") {
+        console.warn(
+          `Overpass API request to ${endpoint} timed out after 10 seconds.`,
+        );
+      } else {
+        console.error("Data agent error:", error);
+      }
       continue;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -352,6 +476,13 @@ async function dataAgent(
       hasErgonomic: true,
       outletDensity: "every_table",
       wifiSpeed: 120,
+      hasPhoneBooths: true,
+      hasNoMusic: true,
+      hasQuietZone: true,
+      singleOriginBeans: true,
+      specialtyEspresso: true,
+      oatAlmondMilk: true,
+      pourOverAvailable: true,
     },
     {
       id: "mock-2",
@@ -369,6 +500,10 @@ async function dataAgent(
       hasErgonomic: false,
       outletDensity: "some_tables",
       wifiSpeed: 45,
+      singleOriginBeans: false,
+      specialtyEspresso: true,
+      oatAlmondMilk: true,
+      pourOverAvailable: true,
     },
     {
       id: "mock-3",
@@ -386,6 +521,10 @@ async function dataAgent(
       hasErgonomic: false,
       outletDensity: "wall_seats",
       wifiSpeed: 15,
+      singleOriginBeans: false,
+      specialtyEspresso: false,
+      oatAlmondMilk: false,
+      pourOverAvailable: false,
     },
   ];
 
@@ -393,32 +532,70 @@ async function dataAgent(
   let filteredMock = mockVenues;
   if (filters) {
     if (filters.wifi) filteredMock = filteredMock.filter((v: any) => v.wifi);
-    if (filters.outlets) filteredMock = filteredMock.filter((v: any) => v.hasOutlets);
-    if (filters.quiet) filteredMock = filteredMock.filter((v: any) => v.noiseLevel === "quiet");
-    if (filters.ergonomic) filteredMock = filteredMock.filter((v: any) => v.hasErgonomic);
+    if (filters.outlets)
+      filteredMock = filteredMock.filter((v: any) => v.hasOutlets);
+    if (filters.quiet)
+      filteredMock = filteredMock.filter((v: any) => v.noiseLevel === "quiet");
+    if (filters.ergonomic)
+      filteredMock = filteredMock.filter((v: any) => v.hasErgonomic);
     if (filters.outletDensity && filters.outletDensity !== "none") {
       if (filters.outletDensity === "every_table") {
-        filteredMock = filteredMock.filter((v: any) => v.outletDensity === "every_table");
+        filteredMock = filteredMock.filter(
+          (v: any) => v.outletDensity === "every_table",
+        );
       } else if (filters.outletDensity === "some_tables") {
-        filteredMock = filteredMock.filter((v: any) => ["every_table", "some_tables"].includes(v.outletDensity));
+        filteredMock = filteredMock.filter((v: any) =>
+          ["every_table", "some_tables"].includes(v.outletDensity),
+        );
       } else if (filters.outletDensity === "wall_seats") {
-        filteredMock = filteredMock.filter((v: any) => ["every_table", "some_tables", "wall_seats"].includes(v.outletDensity));
+        filteredMock = filteredMock.filter((v: any) =>
+          ["every_table", "some_tables", "wall_seats"].includes(
+            v.outletDensity,
+          ),
+        );
       }
     }
     if (filters.wifiSpeedBand && filters.wifiSpeedBand !== "all") {
       if (filters.wifiSpeedBand === "basic") {
-        filteredMock = filteredMock.filter((v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 10);
+        filteredMock = filteredMock.filter(
+          (v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 10,
+        );
       } else if (filters.wifiSpeedBand === "fast") {
-        filteredMock = filteredMock.filter((v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 50);
+        filteredMock = filteredMock.filter(
+          (v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 50,
+        );
       } else if (filters.wifiSpeedBand === "ultra") {
-        filteredMock = filteredMock.filter((v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 100);
+        filteredMock = filteredMock.filter(
+          (v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 100,
+        );
+      }
+    }
+    if (filters.hasPhoneBooths)
+      filteredMock = filteredMock.filter((v: any) => v.hasPhoneBooths);
+    if (filters.hasNoMusic)
+      filteredMock = filteredMock.filter((v: any) => v.hasNoMusic);
+    if (filters.hasQuietZone)
+      filteredMock = filteredMock.filter((v: any) => v.hasQuietZone);
+    if (filters.musicStyle && filters.musicStyle !== "all") {
+      if (filters.musicStyle === "no_music") {
+        filteredMock = filteredMock.filter(
+          (v: any) => v.musicStyle === "no_music" || v.hasNoMusic,
+        );
+      } else {
+        filteredMock = filteredMock.filter(
+          (v: any) => v.musicStyle === filters.musicStyle,
+        );
       }
     }
   }
 
   return {
     venues: filteredMock,
-    meta: { total: filteredMock.length, source: "Simulation Fallback" },
+    meta: {
+      total: filteredMock.length,
+      source: "Simulation Fallback",
+      highTraffic: overpassFailed,
+    },
     reasoning: `Returned ${filteredMock.length} simulated fallback venues due to Overpass API offline status`,
   };
 }
@@ -443,9 +620,14 @@ interface RawVenue {
   hasErgonomic: boolean;
   outletDensity: string;
   wifiSpeed: number | null;
+  hasPhoneBooths: boolean;
+  hasNoMusic: boolean;
+  hasQuietZone: boolean;
 }
 
-async function enrichVenuesWithDBRatings(venues: RawVenue[]): Promise<RawVenue[]> {
+async function enrichVenuesWithDBRatings(
+  venues: RawVenue[],
+): Promise<RawVenue[]> {
   if (venues.length === 0) return venues;
 
   try {
@@ -464,6 +646,9 @@ async function enrichVenuesWithDBRatings(venues: RawVenue[]): Promise<RawVenue[]
         outletPct: number;
         noiseMode: string | null;
         hasErgonomic: boolean;
+        hasPhoneBooths: boolean;
+        hasNoMusic: boolean;
+        hasQuietZone: boolean;
         outletDensity: string | null;
         wifiSpeed: number | null;
       }
@@ -478,6 +663,9 @@ async function enrichVenuesWithDBRatings(venues: RawVenue[]): Promise<RawVenue[]
           outletPct: dbV.hasOutlets ? 100 : 0,
           noiseMode: dbV.noiseLevel ?? null,
           hasErgonomic: dbV.hasErgonomic,
+          hasPhoneBooths: dbV.hasPhoneBooths,
+          hasNoMusic: dbV.hasNoMusic,
+          hasQuietZone: dbV.hasQuietZone,
           outletDensity: dbV.outletDensity ?? null,
           wifiSpeed: dbV.wifiSpeed ?? null,
         });
@@ -489,19 +677,39 @@ async function enrichVenuesWithDBRatings(venues: RawVenue[]): Promise<RawVenue[]
           (ratings.filter((r) => r.hasOutlets).length / ratings.length) * 100;
         const ergonomicPct =
           (ratings.filter((r) => r.hasErgonomic).length / ratings.length) * 100;
+        const phoneBoothsPct =
+          (ratings.filter((r) => r.hasPhoneBooths).length / ratings.length) *
+          100;
+        const noMusicPct =
+          (ratings.filter((r) => r.hasNoMusic).length / ratings.length) * 100;
+        const quietZonePct =
+          (ratings.filter((r) => r.hasQuietZone).length / ratings.length) * 100;
 
-        const validSpeeds = ratings.filter((r) => r.wifiSpeed !== null && r.wifiSpeed > 0).map((r) => r.wifiSpeed as number);
-        const avgSpeed = validSpeeds.length > 0 ? Math.round(validSpeeds.reduce((sum, s) => sum + s, 0) / validSpeeds.length) : null;
+        const validSpeeds = ratings
+          .filter((r) => r.wifiSpeed !== null && r.wifiSpeed > 0)
+          .map((r) => r.wifiSpeed as number);
+        const avgSpeed =
+          validSpeeds.length > 0
+            ? Math.round(
+                validSpeeds.reduce((sum, s) => sum + s, 0) / validSpeeds.length,
+              )
+            : null;
 
         const densityCounts: Record<string, number> = {};
         for (const r of ratings) {
           if (r.outletDensity) {
-            densityCounts[r.outletDensity] = (densityCounts[r.outletDensity] || 0) + 1;
+            densityCounts[r.outletDensity] =
+              (densityCounts[r.outletDensity] || 0) + 1;
           }
         }
-        const outletDensityMode = Object.keys(densityCounts).length > 0
-          ? Object.entries(densityCounts).reduce((best, [lvl, cnt]) => cnt > (densityCounts[best] ?? 0) ? lvl : best, "none")
-          : "none";
+        const outletDensityMode =
+          Object.keys(densityCounts).length > 0
+            ? Object.entries(densityCounts).reduce(
+                (best, [lvl, cnt]) =>
+                  cnt > (densityCounts[best] ?? 0) ? lvl : best,
+                "none",
+              )
+            : "none";
 
         // Mode of noiseLevel
         const noiseCounts: Record<string, number> = {};
@@ -511,7 +719,7 @@ async function enrichVenuesWithDBRatings(venues: RawVenue[]): Promise<RawVenue[]
         const noiseMode = Object.entries(noiseCounts).reduce(
           (best, [level, count]) =>
             count > (noiseCounts[best] ?? 0) ? level : best,
-          "moderate"
+          "moderate",
         );
 
         dbMap.set(dbV.placeId, {
@@ -519,6 +727,9 @@ async function enrichVenuesWithDBRatings(venues: RawVenue[]): Promise<RawVenue[]
           outletPct,
           noiseMode,
           hasErgonomic: ergonomicPct >= 50,
+          hasPhoneBooths: phoneBoothsPct >= 50,
+          hasNoMusic: noMusicPct >= 50,
+          hasQuietZone: quietZonePct >= 50,
           outletDensity: outletDensityMode,
           wifiSpeed: avgSpeed,
         });
@@ -538,6 +749,9 @@ async function enrichVenuesWithDBRatings(venues: RawVenue[]): Promise<RawVenue[]
         noiseLevel: db.noiseMode ?? venue.noiseLevel,
         wifiQuality: db.avgWifi,
         hasErgonomic: db.hasErgonomic,
+        hasPhoneBooths: db.hasPhoneBooths,
+        hasNoMusic: db.hasNoMusic,
+        hasQuietZone: db.hasQuietZone,
         outletDensity: db.outletDensity ?? venue.outletDensity,
         wifiSpeed: db.wifiSpeed ?? venue.wifiSpeed,
       };
@@ -554,18 +768,23 @@ async function enrichVenuesWithDBRatings(venues: RawVenue[]): Promise<RawVenue[]
 // ============================================================
 function reasoningAgent(
   venues: RawVenue[],
-  preferences: { workType?: string; amenities?: string[] }
+  preferences: { workType?: string; amenities?: string[] },
 ): {
-  rankedVenues: Array<RawVenue & { score: number; scoreBreakdown: Record<string, number> }>;
+  rankedVenues: Array<
+    RawVenue & { score: number; scoreBreakdown: Record<string, number> }
+  >;
   summary: string;
   reasoning: string;
 } {
   const { workType = "focus", amenities = [] } = preferences;
 
-  const weights: Record<string, { wifi: number; noise: number; outlets: number; rating: number }> = {
+  const weights: Record<
+    string,
+    { wifi: number; noise: number; outlets: number; rating: number }
+  > = {
     focus: { wifi: 0.25, noise: 0.35, outlets: 0.25, rating: 0.15 },
-    calls: { wifi: 0.40, noise: 0.30, outlets: 0.15, rating: 0.15 },
-    collaboration: { wifi: 0.30, noise: 0.20, outlets: 0.25, rating: 0.25 },
+    calls: { wifi: 0.4, noise: 0.3, outlets: 0.15, rating: 0.15 },
+    collaboration: { wifi: 0.3, noise: 0.2, outlets: 0.25, rating: 0.25 },
     casual: { wifi: 0.25, noise: 0.25, outlets: 0.25, rating: 0.25 },
   };
 
@@ -575,27 +794,34 @@ function reasoningAgent(
     // WiFi: use crowdsourced wifiQuality (0-10) if available, else boolean tag
     const wifiScore =
       venue.wifiQuality != null
-        ? Math.min(10, venue.wifiQuality)   // crowdsourced 0-10
+        ? Math.min(10, venue.wifiQuality) // crowdsourced 0-10
         : venue.wifi
-          ? 7                                  // OSM wlan tag present
-          : 3;                                 // unknown
+          ? 7 // OSM wlan tag present
+          : 3; // unknown
 
     // Noise: crowdsourced mode from DB, or OSM tag
     const noiseScore =
-      venue.noiseLevel === "quiet" ? 9 :
-        venue.noiseLevel === "moderate" ? 6 : 3;
+      venue.noiseLevel === "quiet"
+        ? 9
+        : venue.noiseLevel === "moderate"
+          ? 6
+          : 3;
 
     // Outlets: crowdsourced boolean (outletPct >= 50%) or OSM
     const outletsScore = venue.hasOutlets ? 8 : 4;
 
     // Rating: from OSM/DB avg
-    const ratingScore = venue.rating != null ? Math.min(10, venue.rating * 2) : 5;
+    const ratingScore =
+      venue.rating != null ? Math.min(10, venue.rating * 2) : 5;
 
     // Extra bonus for explicitly-requested features
     let amenityBonus = 0;
-    if (amenities.includes("wifi") && wifiScore >= 6) amenityBonus += 1;
-    if (amenities.includes("quiet") && venue.noiseLevel === "quiet") amenityBonus += 1;
-    if (amenities.includes("outlets") && venue.hasOutlets) amenityBonus += 1;
+    const safeAmenities = amenities || [];
+    if (safeAmenities.includes("wifi") && wifiScore >= 6) amenityBonus += 1;
+    if (safeAmenities.includes("quiet") && venue.noiseLevel === "quiet")
+      amenityBonus += 1;
+    if (safeAmenities.includes("outlets") && venue.hasOutlets)
+      amenityBonus += 1;
 
     const totalScore =
       wifiScore * w.wifi +
@@ -607,7 +833,12 @@ function reasoningAgent(
     return {
       ...venue,
       score: Math.min(10, Math.round(totalScore * 10) / 10),
-      scoreBreakdown: { wifi: wifiScore, noise: noiseScore, outlets: outletsScore, rating: ratingScore },
+      scoreBreakdown: {
+        wifi: wifiScore,
+        noise: noiseScore,
+        outlets: outletsScore,
+        rating: ratingScore,
+      },
     };
   });
 
@@ -630,19 +861,24 @@ function reasoningAgent(
 // ============================================================
 async function actionAgent(
   rankedVenues: any[],
-  _userQuery: string
+  _userQuery: string,
 ): Promise<{
   message: string;
   mapUpdates: any;
   suggestions: string[];
 }> {
-  const venueList = rankedVenues.slice(0, 5).map((v, i) =>
-    `${i + 1}. **${v.name}** (${v.category}) - Score: ${v.score}/10${v.wifi ? " 📶" : ""}${v.hasOutlets ? " 🔌" : ""}`
-  ).join("\n");
+  const venueList = rankedVenues
+    .slice(0, 5)
+    .map(
+      (v, i) =>
+        `${i + 1}. **${v.name}** (${v.category}) - Score: ${v.score}/10${v.wifi ? " 📶" : ""}${v.hasOutlets ? " 🔌" : ""}`,
+    )
+    .join("\n");
 
-  const message = rankedVenues.length > 0
-    ? `I found ${rankedVenues.length} great workspaces near you!\n\n${venueList}\n\nThe markers are now on your map. Click any venue for more details.`
-    : "I couldn't find any workspaces matching your criteria. Try expanding your search radius or adjusting your filters.";
+  const message =
+    rankedVenues.length > 0
+      ? `I found ${rankedVenues.length} great workspaces near you!\n\n${venueList}\n\nThe markers are now on your map. Click any venue for more details.`
+      : "I couldn't find any workspaces matching your criteria. Try expanding your search radius or adjusting your filters.";
 
   const markers = rankedVenues.slice(0, 10).map((v) => ({
     id: v.id,
@@ -660,8 +896,10 @@ async function actionAgent(
   let center = { lat: 0, lng: 0 };
   if (rankedVenues.length > 0) {
     center = {
-      lat: rankedVenues.reduce((sum, v) => sum + v.lat, 0) / rankedVenues.length,
-      lng: rankedVenues.reduce((sum, v) => sum + v.lng, 0) / rankedVenues.length,
+      lat:
+        rankedVenues.reduce((sum, v) => sum + v.lat, 0) / rankedVenues.length,
+      lng:
+        rankedVenues.reduce((sum, v) => sum + v.lng, 0) / rankedVenues.length,
     };
   }
 
@@ -689,13 +927,16 @@ export async function POST(req: Request) {
 
     // Rate limiting (now async)
     if (!(await rateLimit(identifier, 20))) {
-      const info = getRateLimitInfo(identifier);
+      const info = await getRateLimitInfo(identifier);
       return Response.json(
         {
-          error: "Rate limit exceeded. Please wait before sending more messages.",
-          retryAfter: info?.resetTime ? Math.ceil((info.resetTime - Date.now()) / 1000) : 60
+          error:
+            "Rate limit exceeded. Please wait before sending more messages.",
+          retryAfter: info?.resetTime
+            ? Math.ceil((info.resetTime - Date.now()) / 1000)
+            : 60,
         },
-        { status: 429 }
+        { status: 429 },
       );
     }
 
@@ -712,9 +953,18 @@ export async function POST(req: Request) {
     const { filters } = body; // filters is optional, not in schema
 
     // Normalize location - use null if not valid
-    const validLocation = location && typeof location.lat === 'number' && typeof location.lng === 'number' ? location : null;
+    const validLocation =
+      location &&
+      typeof location.lat === "number" &&
+      typeof location.lng === "number"
+        ? location
+        : null;
 
-    console.log("Chat request:", { messagesCount: messages?.length, location: validLocation, filters });
+    console.log("Chat request:", {
+      messagesCount: messages?.length,
+      location: validLocation,
+      filters,
+    });
 
     const userMessage = messages[messages.length - 1]?.content || "";
     const agentSteps: any[] = [];
@@ -722,7 +972,9 @@ export async function POST(req: Request) {
     // ====== STEP 1: ORCHESTRATOR ======
     console.log("Running Orchestrator Agent...");
     const orchStart = Date.now();
-    const orchestratorResult = await orchestratorAgent(userMessage, { location: validLocation });
+    const orchestratorResult = await orchestratorAgent(userMessage, {
+      location: validLocation,
+    });
     agentSteps.push({
       agent: "Orchestrator",
       result: orchestratorResult,
@@ -732,25 +984,84 @@ export async function POST(req: Request) {
 
     // If general conversation, respond directly
     if (orchestratorResult.skipAgents) {
-      const response = await getGroqClient().chat.completions.create({
+      const responseStream = await getGroqClient().chat.completions.create({
         model: "llama-3.3-70b-versatile",
+        stream: true,
         messages: [
           {
             role: "system",
-            content: "You are WorkHub AI, a friendly assistant for finding workspaces. Be helpful and conversational.",
+            content:
+              'You are WorkHub AI, a friendly assistant for finding workspaces. Be helpful and conversational. When appropriate to show data, output <ui-component name="DataTable" props=\'{"columns": [...], "data": [...]}\' /> or <ui-component name="Map" props=\'{"markers": [...]}\' />.',
           },
-          ...messages.map((m: any) => ({ 
-            role: m.role, 
-            content: m.name ? `[User: ${m.name}] ${m.content}` : m.content 
+          ...messages.map((m: any) => ({
+            role: m.role,
+            content: m.name ? `[User: ${m.name}] ${m.content}` : m.content,
           })),
         ],
       });
 
-      return Response.json({
-        content: response.choices[0]?.message?.content || "Hello! How can I help you find a workspace today?",
-        agentSteps,
-        venues: [],
-        cached: false,
+      const stream = new ReadableStream({
+        async start(controller) {
+          const metadata = {
+            venues: [],
+            agentSteps,
+            cached: false,
+            suggestions: [],
+            complexity: orchestratorResult.complexity,
+          };
+          controller.enqueue(
+            new TextEncoder().encode(
+              `METADATA:${JSON.stringify(metadata)}\n\n`,
+            ),
+          );
+
+          let fullContent = "";
+          try {
+            for await (const chunk of responseStream) {
+              const text = chunk.choices[0]?.delta?.content || "";
+              if (text) {
+                fullContent += text;
+                controller.enqueue(new TextEncoder().encode(`TEXT:${text}`));
+              }
+            }
+          } catch (e) {
+            console.error("Stream error:", e);
+          }
+
+          if (userId && conversationId) {
+            try {
+              await prisma.message.create({
+                data: { conversationId, role: "user", content: userMessage },
+              });
+              await prisma.message.create({
+                data: {
+                  conversationId,
+                  role: "assistant",
+                  content: fullContent,
+                  agentName: "GeneralChat",
+                },
+              });
+              await prisma.conversation.update({
+                where: { id: conversationId },
+                data: { updatedAt: new Date() },
+              });
+
+              // Trigger background preference learning & summary updates
+              triggerBackgroundMemorySync(conversationId, userId);
+            } catch (dbError) {
+              console.error("Database save error:", dbError);
+            }
+          }
+
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
       });
     }
 
@@ -764,7 +1075,10 @@ export async function POST(req: Request) {
     if (orchestratorResult.complexity === "complex") {
       // Try semantic cache
       console.log("Checking Semantic Cache...");
-      const cachedResponse = await checkSemanticCache(userMessage, validLocation ? `${validLocation.lat},${validLocation.lng}` : null);
+      const cachedResponse = await checkSemanticCache(
+        userMessage,
+        validLocation ? `${validLocation.lat},${validLocation.lng}` : null,
+      );
 
       if (cachedResponse) {
         console.log("Semantic Cache Hit!");
@@ -790,10 +1104,12 @@ export async function POST(req: Request) {
           result: {
             summary: "Served from cache",
             reasoning: "Matched a highly similar recent query",
-            topVenues: reasoningResult.rankedVenues.slice(0, 3).map((v: any) => ({
-              name: v.name,
-              score: v.score,
-            })),
+            topVenues: reasoningResult.rankedVenues
+              .slice(0, 3)
+              .map((v: any) => ({
+                name: v.name,
+                score: v.score,
+              })),
           },
           timestamp: Date.now(),
           latencyMs: 50,
@@ -802,7 +1118,10 @@ export async function POST(req: Request) {
     }
 
     if (!isCached) {
-      if (orchestratorResult.complexity === "simple" && orchestratorResult.parameters) {
+      if (
+        orchestratorResult.complexity === "simple" &&
+        orchestratorResult.parameters
+      ) {
         console.log("Bypassing Context Agent for Simple query...");
         contextResult = { parameters: orchestratorResult.parameters };
         agentSteps.push({
@@ -815,7 +1134,11 @@ export async function POST(req: Request) {
         // ====== STEP 2: CONTEXT AGENT ======
         console.log("Running Context Agent...");
         const contextStart = Date.now();
-        contextResult = await contextAgent(userMessage, validLocation ?? undefined, userId);
+        contextResult = await contextAgent(
+          userMessage,
+          validLocation ?? undefined,
+          userId,
+        );
         agentSteps.push({
           agent: "Context",
           result: contextResult,
@@ -841,31 +1164,83 @@ export async function POST(req: Request) {
 
       // ====== STEP 3b: DB ENRICHMENT ======
       console.log("Enriching venues with DB ratings...");
-      enrichedVenues = await enrichVenuesWithDBRatings(dataResult.venues as RawVenue[]);
+      enrichedVenues = await enrichVenuesWithDBRatings(
+        dataResult.venues as RawVenue[],
+      );
 
       // Apply advanced filters post-DB enrichment
       let finalFilteredVenues = enrichedVenues;
       if (filters) {
-        if (filters.wifi) finalFilteredVenues = finalFilteredVenues.filter((v: any) => v.wifi);
-        if (filters.outlets) finalFilteredVenues = finalFilteredVenues.filter((v: any) => v.hasOutlets);
-        if (filters.quiet) finalFilteredVenues = finalFilteredVenues.filter((v: any) => v.noiseLevel === "quiet");
-        if (filters.ergonomic) finalFilteredVenues = finalFilteredVenues.filter((v: any) => v.hasErgonomic);
+        if (filters.wifi)
+          finalFilteredVenues = finalFilteredVenues.filter((v: any) => v.wifi);
+        if (filters.outlets)
+          finalFilteredVenues = finalFilteredVenues.filter(
+            (v: any) => v.hasOutlets,
+          );
+        if (filters.quiet)
+          finalFilteredVenues = finalFilteredVenues.filter(
+            (v: any) => v.noiseLevel === "quiet",
+          );
+        if (filters.ergonomic)
+          finalFilteredVenues = finalFilteredVenues.filter(
+            (v: any) => v.hasErgonomic,
+          );
         if (filters.outletDensity && filters.outletDensity !== "none") {
           if (filters.outletDensity === "every_table") {
-            finalFilteredVenues = finalFilteredVenues.filter((v: any) => v.outletDensity === "every_table");
+            finalFilteredVenues = finalFilteredVenues.filter(
+              (v: any) => v.outletDensity === "every_table",
+            );
           } else if (filters.outletDensity === "some_tables") {
-            finalFilteredVenues = finalFilteredVenues.filter((v: any) => ["every_table", "some_tables"].includes(v.outletDensity));
+            finalFilteredVenues = finalFilteredVenues.filter((v: any) =>
+              ["every_table", "some_tables"].includes(v.outletDensity),
+            );
           } else if (filters.outletDensity === "wall_seats") {
-            finalFilteredVenues = finalFilteredVenues.filter((v: any) => ["every_table", "some_tables", "wall_seats"].includes(v.outletDensity));
+            finalFilteredVenues = finalFilteredVenues.filter((v: any) =>
+              ["every_table", "some_tables", "wall_seats"].includes(
+                v.outletDensity,
+              ),
+            );
           }
         }
         if (filters.wifiSpeedBand && filters.wifiSpeedBand !== "all") {
           if (filters.wifiSpeedBand === "basic") {
-            finalFilteredVenues = finalFilteredVenues.filter((v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 10);
+            finalFilteredVenues = finalFilteredVenues.filter(
+              (v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 10,
+            );
           } else if (filters.wifiSpeedBand === "fast") {
-            finalFilteredVenues = finalFilteredVenues.filter((v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 50);
+            finalFilteredVenues = finalFilteredVenues.filter(
+              (v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 50,
+            );
           } else if (filters.wifiSpeedBand === "ultra") {
-            finalFilteredVenues = finalFilteredVenues.filter((v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 100);
+            finalFilteredVenues = finalFilteredVenues.filter(
+              (v: any) => v.wifiSpeed !== null && v.wifiSpeed >= 100,
+            );
+          }
+        }
+        if (filters.hasPhoneBooths) {
+          finalFilteredVenues = finalFilteredVenues.filter(
+            (v: any) => v.hasPhoneBooths,
+          );
+        }
+        if (filters.hasNoMusic) {
+          finalFilteredVenues = finalFilteredVenues.filter(
+            (v: any) => v.hasNoMusic,
+          );
+        }
+        if (filters.hasQuietZone) {
+          finalFilteredVenues = finalFilteredVenues.filter(
+            (v: any) => v.hasQuietZone,
+          );
+        }
+        if (filters.musicStyle && filters.musicStyle !== "all") {
+          if (filters.musicStyle === "no_music") {
+            finalFilteredVenues = finalFilteredVenues.filter(
+              (v: any) => v.musicStyle === "no_music" || v.hasNoMusic,
+            );
+          } else {
+            finalFilteredVenues = finalFilteredVenues.filter(
+              (v: any) => v.musicStyle === filters.musicStyle,
+            );
           }
         }
       }
@@ -875,7 +1250,13 @@ export async function POST(req: Request) {
         reasoningResult = {
           summary: "Here are some basic matches.",
           reasoning: "Simple query routing",
-          rankedVenues: finalFilteredVenues.map(v => ({ ...v, score: 50, pros: [], cons: [], aiSummary: "Matches basic criteria" }))
+          rankedVenues: finalFilteredVenues.map((v) => ({
+            ...v,
+            score: 50,
+            pros: [],
+            cons: [],
+            aiSummary: "Matches basic criteria",
+          })),
         };
         agentSteps.push({
           agent: "Reasoning",
@@ -896,24 +1277,33 @@ export async function POST(req: Request) {
           result: {
             summary: reasoningResult.summary,
             reasoning: reasoningResult.reasoning,
-            topVenues: reasoningResult.rankedVenues.slice(0, 3).map((v: any) => ({
-              name: v.name,
-              score: v.score,
-            })),
+            topVenues: reasoningResult.rankedVenues
+              .slice(0, 3)
+              .map((v: any) => ({
+                name: v.name,
+                score: v.score,
+              })),
           },
           timestamp: Date.now(),
           latencyMs: Date.now() - reasoningStart,
         });
 
         // Save to cache
-        await setSemanticCache(userMessage, validLocation ? `${validLocation.lat},${validLocation.lng}` : null, reasoningResult);
+        await setSemanticCache(
+          userMessage,
+          validLocation ? `${validLocation.lat},${validLocation.lng}` : null,
+          reasoningResult,
+        );
       }
     }
 
     // ====== STEP 5: ACTION AGENT ======
     console.log("Running Action Agent...");
     const actionStart = Date.now();
-    const actionResult = await actionAgent(reasoningResult.rankedVenues, userMessage);
+    const actionResult = await actionAgent(
+      reasoningResult.rankedVenues,
+      userMessage,
+    );
     agentSteps.push({
       agent: "Action",
       result: {
@@ -924,39 +1314,99 @@ export async function POST(req: Request) {
       latencyMs: Date.now() - actionStart,
     });
 
-    // ====== SAVE TO DATABASE (if user is authenticated) ======
-    try {
-      const { userId } = await auth();
-      if (userId && conversationId) {
-        await prisma.message.create({
-          data: { conversationId, role: "user", content: userMessage },
-        });
-        await prisma.message.create({
-          data: { conversationId, role: "assistant", content: actionResult.message, agentName: "ActionAgent" },
-        });
-        await prisma.conversation.update({
-          where: { id: conversationId },
-          data: { updatedAt: new Date() },
-        });
-      }
-    } catch (dbError) {
-      console.error("Database save error:", dbError);
-    }
+    // ====== GENERATE STREAM RESPONSE ======
+    const groq = getGroqClient();
+    const systemPrompt = `You are WorkHub AI, a helpful workspace assistant. 
+You can use Generative UI. When you need to show a map, use:
+<ui-component name="Map" props='{"markers": [{"lat": ..., "lng": ..., "name": "...", "category": "..."}]}' />
+When you need to show a table, use:
+<ui-component name="DataTable" props='{"columns": ["Name", "Category", "Score"], "data": [{"Name": "...", "Category": "...", "Score": "..."}]}' />
+Here are the top venues found: ${JSON.stringify(reasoningResult.rankedVenues.map((v: any) => ({ name: v.name, category: v.category, lat: v.lat, lng: v.lng, score: v.score })))}
+Address the user's query and include UI components if helpful.`;
 
-    return Response.json({
-      content: actionResult.message,
-      venues: reasoningResult.rankedVenues,
-      mapUpdates: actionResult.mapUpdates,
-      suggestions: actionResult.suggestions,
-      agentSteps,
-      cached: isCached,
-      complexity: orchestratorResult.complexity,
+    const llmMessages = [
+      { role: "system", content: systemPrompt },
+      ...messages.map((m: any) => ({
+        role: m.role,
+        content: m.name ? `[User: ${m.name}] ${m.content}` : m.content,
+      })),
+    ];
+
+    const responseStream = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      stream: true,
+      messages: llmMessages as any,
+    });
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const metadata = {
+          venues: reasoningResult.rankedVenues,
+          mapUpdates: actionResult.mapUpdates,
+          suggestions: actionResult.suggestions,
+          agentSteps,
+          cached: isCached,
+          complexity: orchestratorResult.complexity,
+          highTraffic: dataResult?.meta?.highTraffic || false,
+        };
+        controller.enqueue(
+          new TextEncoder().encode(`METADATA:${JSON.stringify(metadata)}\n\n`),
+        );
+
+        let fullContent = "";
+        try {
+          for await (const chunk of responseStream) {
+            const text = chunk.choices[0]?.delta?.content || "";
+            if (text) {
+              fullContent += text;
+              controller.enqueue(new TextEncoder().encode(`TEXT:${text}`));
+            }
+          }
+        } catch (e) {
+          console.error("Stream error", e);
+        }
+
+        if (userId && conversationId) {
+          try {
+            await prisma.message.create({
+              data: { conversationId, role: "user", content: userMessage },
+            });
+            await prisma.message.create({
+              data: {
+                conversationId,
+                role: "assistant",
+                content: fullContent,
+                agentName: "ActionAgent",
+              },
+            });
+            await prisma.conversation.update({
+              where: { id: conversationId },
+              data: { updatedAt: new Date() },
+            });
+
+            // Trigger background preference learning & summary updates
+            triggerBackgroundMemorySync(conversationId, userId);
+          } catch (dbError) {
+            console.error("Database save error:", dbError);
+          }
+        }
+
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
     });
   } catch (error) {
     console.error("Chat API error:", error);
     return Response.json(
       { error: error instanceof Error ? error.message : "An error occurred" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

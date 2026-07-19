@@ -1,12 +1,33 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useUser } from "@clerk/nextjs";
-import { 
-  getAnalyticsSummary, 
-  getAgentMetrics, 
+import { useUser as useClerkUser } from "@clerk/nextjs";
+// Mock useUser for local development bypass if dummy keys are used
+const useUser = () => {
+  const isDummy =
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY ===
+    "pk_test_ZXhhbXBsZS5hY2NvdW50cy5kZXYk";
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const clerkUser = !isDummy ? useClerkUser() : null;
+
+  if (isDummy) {
+    return {
+      isLoaded: true,
+      isSignedIn: true,
+      user: {
+        firstName: "Nomad",
+        lastName: "Scout",
+        emailAddresses: [{ emailAddress: "nomad.scout@worksphere.dev" }],
+      },
+    };
+  }
+  return clerkUser || { isLoaded: false, isSignedIn: false, user: null };
+};
+import {
+  getAnalyticsSummary,
+  getAgentMetrics,
   getPopularSearches,
-  clearAnalytics
+  clearAnalytics,
 } from "@/lib/analytics";
 import {
   BarChart3,
@@ -22,6 +43,9 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { MemoryManager } from "./MemoryManager";
+import { NotificationSettings } from "./NotificationSettings";
+import { CheckInHistory } from "./CheckInHistory";
+import { WorkStyleProfile } from "./WorkStyleProfile";
 
 interface AgentMetric {
   agent: string;
@@ -48,9 +72,15 @@ interface AnalyticsSummary {
 
 export default function DashboardPage() {
   const { isSignedIn, user } = useUser();
-  const [summary, setSummary] = useState<AnalyticsSummary | null>(() => getAnalyticsSummary());
-  const [agentMetrics, setAgentMetrics] = useState<AgentMetric[]>(() => getAgentMetrics());
-  const [popularSearches, setPopularSearches] = useState<SearchPattern[]>(() => getPopularSearches(10));
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(() =>
+    getAnalyticsSummary(),
+  );
+  const [agentMetrics, setAgentMetrics] = useState<AgentMetric[]>(() =>
+    getAgentMetrics(),
+  );
+  const [popularSearches, setPopularSearches] = useState<SearchPattern[]>(() =>
+    getPopularSearches(10),
+  );
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const loadData = useCallback(() => {
@@ -93,7 +123,7 @@ export default function DashboardPage() {
       <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-4">
-            <Link 
+            <Link
               href="/ai"
               className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
             >
@@ -104,7 +134,9 @@ export default function DashboardPage() {
                 Analytics Dashboard
               </h1>
               <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                {isSignedIn ? `Welcome, ${user?.firstName || 'User'}` : 'Development Analytics'}
+                {isSignedIn
+                  ? `Welcome, ${user?.firstName || "User"}`
+                  : "Development Analytics"}
               </p>
             </div>
           </div>
@@ -114,7 +146,9 @@ export default function DashboardPage() {
               disabled={isRefreshing}
               className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
             >
-              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <RefreshCw
+                className={`w-4 h-4 ${isRefreshing ? "animate-spin" : ""}`}
+              />
               Refresh
             </button>
             <button
@@ -172,10 +206,15 @@ export default function DashboardPage() {
                     className="flex items-center justify-between p-3 bg-zinc-50 dark:bg-zinc-800 rounded-lg"
                   >
                     <div className="flex items-center gap-3">
-                      <div className={`w-2 h-2 rounded-full ${
-                        metric.successRate >= 90 ? 'bg-green-500' :
-                        metric.successRate >= 70 ? 'bg-yellow-500' : 'bg-red-500'
-                      }`} />
+                      <div
+                        className={`w-2 h-2 rounded-full ${
+                          metric.successRate >= 90
+                            ? "bg-green-500"
+                            : metric.successRate >= 70
+                              ? "bg-yellow-500"
+                              : "bg-red-500"
+                        }`}
+                      />
                       <span className="font-medium text-zinc-900 dark:text-zinc-50">
                         {metric.agent}
                       </span>
@@ -184,10 +223,15 @@ export default function DashboardPage() {
                       <span className="text-zinc-600 dark:text-zinc-400">
                         {formatDuration(metric.avgDuration)}
                       </span>
-                      <span className={`font-medium ${
-                        metric.successRate >= 90 ? 'text-green-600' :
-                        metric.successRate >= 70 ? 'text-yellow-600' : 'text-red-600'
-                      }`}>
+                      <span
+                        className={`font-medium ${
+                          metric.successRate >= 90
+                            ? "text-green-600"
+                            : metric.successRate >= 70
+                              ? "text-yellow-600"
+                              : "text-red-600"
+                        }`}
+                      >
                         {metric.successRate}%
                       </span>
                       <span className="text-zinc-500">
@@ -253,34 +297,49 @@ export default function DashboardPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-zinc-200 dark:border-zinc-800">
-                    <th className="text-left py-2 px-3 text-zinc-600 dark:text-zinc-400">Time</th>
-                    <th className="text-left py-2 px-3 text-zinc-600 dark:text-zinc-400">Event</th>
-                    <th className="text-left py-2 px-3 text-zinc-600 dark:text-zinc-400">Details</th>
+                    <th className="text-left py-2 px-3 text-zinc-600 dark:text-zinc-400">
+                      Time
+                    </th>
+                    <th className="text-left py-2 px-3 text-zinc-600 dark:text-zinc-400">
+                      Event
+                    </th>
+                    <th className="text-left py-2 px-3 text-zinc-600 dark:text-zinc-400">
+                      Details
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {summary?.recentEvents.slice().reverse().map((event, index) => (
-                    <tr key={index} className="border-b border-zinc-100 dark:border-zinc-800/50">
-                      <td className="py-2 px-3 text-zinc-500">
-                        {formatTime(event.timestamp)}
-                      </td>
-                      <td className="py-2 px-3">
-                        <span className="inline-flex items-center gap-1">
-                          {event.name.includes('error') ? (
-                            <XCircle className="w-3 h-3 text-red-500" />
-                          ) : (
-                            <CheckCircle className="w-3 h-3 text-green-500" />
-                          )}
-                          <span className="text-zinc-900 dark:text-zinc-50">
-                            {event.name.replace(/_/g, ' ')}
+                  {summary?.recentEvents
+                    .slice()
+                    .reverse()
+                    .map((event, index) => (
+                      <tr
+                        key={index}
+                        className="border-b border-zinc-100 dark:border-zinc-800/50"
+                      >
+                        <td className="py-2 px-3 text-zinc-500">
+                          {formatTime(event.timestamp)}
+                        </td>
+                        <td className="py-2 px-3">
+                          <span className="inline-flex items-center gap-1">
+                            {event.name.includes("error") ? (
+                              <XCircle className="w-3 h-3 text-red-500" />
+                            ) : (
+                              <CheckCircle className="w-3 h-3 text-green-500" />
+                            )}
+                            <span className="text-zinc-900 dark:text-zinc-50">
+                              {event.name.replace(/_/g, " ")}
+                            </span>
                           </span>
-                        </span>
-                      </td>
-                      <td className="py-2 px-3 text-zinc-500 truncate max-w-[300px]">
-                        {event.properties ? JSON.stringify(event.properties).slice(0, 50) + '...' : '-'}
-                      </td>
-                    </tr>
-                  ))}
+                        </td>
+                        <td className="py-2 px-3 text-zinc-500 truncate max-w-[300px]">
+                          {event.properties
+                            ? JSON.stringify(event.properties).slice(0, 50) +
+                              "..."
+                            : "-"}
+                        </td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
             </div>
@@ -293,36 +352,47 @@ export default function DashboardPage() {
             Event Distribution
           </h2>
           <div className="flex flex-wrap gap-3">
-            {Object.entries(summary?.eventCounts || {}).map(([event, count]) => (
-              <div
-                key={event}
-                className="flex items-center gap-2 px-3 py-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg"
-              >
-                <span className="text-zinc-700 dark:text-zinc-300">
-                  {event.replace(/_/g, ' ')}
-                </span>
-                <span className="px-2 py-0.5 bg-blue-600 text-white text-xs rounded-full">
-                  {count}
-                </span>
-              </div>
-            ))}
+            {Object.entries(summary?.eventCounts || {}).map(
+              ([event, count]) => (
+                <div
+                  key={event}
+                  className="flex items-center gap-2 px-3 py-2 bg-zinc-100 dark:bg-zinc-800 rounded-lg"
+                >
+                  <span className="text-zinc-700 dark:text-zinc-300">
+                    {event.replace(/_/g, " ")}
+                  </span>
+                  <span className="px-2 py-0.5 bg-blue-600 text-white text-xs rounded-full">
+                    {count}
+                  </span>
+                </div>
+              ),
+            )}
           </div>
         </div>
 
-        {/* AI Memory Management */}
-        <MemoryManager />
+        {/* Settings & AI Memory Management */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+          <WorkStyleProfile />
+          <NotificationSettings />
+          <MemoryManager />
+        </div>
+
+        {/* Check-In History */}
+        <div className="mt-6">
+          <CheckInHistory />
+        </div>
       </div>
     </div>
   );
 }
 
-function StatCard({ 
-  icon, 
-  label, 
-  value 
-}: { 
-  icon: React.ReactNode; 
-  label: string; 
+function StatCard({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
   value: number;
 }) {
   return (
@@ -333,7 +403,9 @@ function StatCard({
         </div>
         <div>
           <p className="text-sm text-zinc-600 dark:text-zinc-400">{label}</p>
-          <p className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">{value}</p>
+          <p className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
+            {value}
+          </p>
         </div>
       </div>
     </div>

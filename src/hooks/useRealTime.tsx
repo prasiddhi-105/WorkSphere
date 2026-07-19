@@ -7,6 +7,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useAuth } from "@clerk/nextjs";
 import usePartySocket from "partysocket/react";
 import YProvider from "y-partykit/provider";
 import * as Y from "yjs";
@@ -72,7 +73,11 @@ export function useRealTimeUpdates(options: UseRealTimeUpdatesOptions = {}) {
       eventSource.onmessage = (event) => {
         try {
           const update = JSON.parse(event.data) as VenueUpdate;
-          if (update.type === "rating" || update.type === "availability" || update.type === "new_review") {
+          if (
+            update.type === "rating" ||
+            update.type === "availability" ||
+            update.type === "new_review"
+          ) {
             setUpdates((prev) => [...prev.slice(-49), update]);
           }
         } catch (e) {
@@ -82,19 +87,25 @@ export function useRealTimeUpdates(options: UseRealTimeUpdatesOptions = {}) {
 
       eventSource.onerror = () => {
         setIsConnected(false);
-        const isOffline = typeof window !== "undefined" && !window.navigator.onLine;
+        const isOffline =
+          typeof window !== "undefined" && !window.navigator.onLine;
 
-        setError(isOffline ? "Browser is offline" : "Connection failed. Retrying...");
+        setError(
+          isOffline ? "Browser is offline" : "Connection failed. Retrying...",
+        );
         eventSource?.close();
 
         // Exponential backoff: double the delay up to 30 seconds
-        console.warn(`[RealTime] Connection failed. Retrying in ${currentBackoff / 1000}s...`);
+        console.warn(
+          `[RealTime] Connection failed. Retrying in ${currentBackoff / 1000}s...`,
+        );
         clearTimeout(reconnectTimeout);
         reconnectTimeout = setTimeout(connect, currentBackoff);
         currentBackoff = Math.min(30000, currentBackoff * 2);
       };
     };
 
+    // Handle online/offline events automatically
     // Handle online/offline events automatically
     const handleOnline = () => {
       console.log("[RealTime] Browser online, reconnecting...");
@@ -110,8 +121,29 @@ export function useRealTimeUpdates(options: UseRealTimeUpdatesOptions = {}) {
       clearTimeout(reconnectTimeout);
     };
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        console.log("[RealTime] Tab focused, checking stream health...");
+        if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
+          currentBackoff = 1000;
+          connect();
+        }
+
+        console.log("[RealTime] Tab became visible, resetting connection");
+        currentBackoff = 1000;
+        if (eventSource) {
+          eventSource.close();
+        }
+        connect();
+      }
+    };
+
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+
+    window.addEventListener("visibilitychange", handleVisibilityChange); // 🌟 ADD THIS LINE
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     connect();
 
@@ -120,6 +152,10 @@ export function useRealTimeUpdates(options: UseRealTimeUpdatesOptions = {}) {
       clearTimeout(reconnectTimeout);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
+
+      window.removeEventListener("visibilitychange", handleVisibilityChange); // 🌟 ADD THIS LINE
+
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [venueIdsKey, enabled]);
 
@@ -131,7 +167,7 @@ export function useRealTimeUpdates(options: UseRealTimeUpdatesOptions = {}) {
  */
 export function useOptimisticUpdate<T>(
   initialValue: T,
-  updateFn: (value: T) => Promise<T>
+  updateFn: (value: T) => Promise<T>,
 ) {
   const [value, setValue] = useState(initialValue);
   const [isPending, setIsPending] = useState(false);
@@ -154,7 +190,7 @@ export function useOptimisticUpdate<T>(
         setIsPending(false);
       }
     },
-    [value, updateFn]
+    [value, updateFn],
   );
 
   return { value, update, isPending, error };
@@ -166,7 +202,7 @@ export function useOptimisticUpdate<T>(
 export function usePollingUpdates<T>(
   fetchFn: () => Promise<T>,
   interval: number = 30000,
-  enabled: boolean = true
+  enabled: boolean = true,
 ) {
   const [data, setData] = useState<T | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -222,17 +258,26 @@ export function ConnectionStatus({ isConnected }: { isConnected: boolean }) {
 export function useMultiplayerSession(roomId: string | null) {
   const [provider, setProvider] = useState<YProvider | null>(null);
   const [yDoc, setYDoc] = useState<Y.Doc | null>(null);
+  const { getToken } = useAuth();
+  const [token, setToken] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!roomId) {
+    getToken().then(setToken).catch(console.error);
+  }, [getToken]);
+
+  useEffect(() => {
+    if (!roomId || token === null) {
       setProvider(null);
       setYDoc(null);
       return;
     }
 
     const doc = new Y.Doc();
-    const newProvider = new YProvider("127.0.0.1:1999", roomId, doc);
-    
+    // Pass the token as a query parameter in the options
+    const newProvider = new YProvider("127.0.0.1:1999", roomId, doc, {
+      params: token ? { token } : {},
+    });
+
     setYDoc(doc);
     setProvider(newProvider);
 
@@ -240,15 +285,16 @@ export function useMultiplayerSession(roomId: string | null) {
       newProvider.disconnect();
       doc.destroy();
     };
-  }, [roomId]);
+  }, [roomId, token]);
 
   // Use standard websocket for simple presence broadcast
   const socket = usePartySocket({
     host: "127.0.0.1:1999",
     room: roomId || "default",
-    onMessage(event) {
+    query: token ? { token } : undefined,
+    onMessage() {
       // handled in component
-    }
+    },
   });
 
   return { provider, yDoc, socket };
