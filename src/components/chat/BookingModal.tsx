@@ -670,7 +670,10 @@ export function BookingModal({
 
               <div className="grid grid-cols-2 gap-6">
                 <div className="space-y-2">
-                  <label htmlFor="allocation-date" className="text-[10px] font-black uppercase tracking-widest text-zinc-500 ml-2">
+                  <label
+                    htmlFor="allocation-date"
+                    className="text-[10px] font-black uppercase tracking-widest text-zinc-500 ml-2"
+                  >
                     Allocation Date
                   </label>
                   <div className="relative">
@@ -686,7 +689,10 @@ export function BookingModal({
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <label htmlFor="arrival-time" className="text-[10px] font-black uppercase tracking-widest text-zinc-500 ml-2">
+                  <label
+                    htmlFor="arrival-time"
+                    className="text-[10px] font-black uppercase tracking-widest text-zinc-500 ml-2"
+                  >
                     Arrival Time
                   </label>
                   <div className="relative">

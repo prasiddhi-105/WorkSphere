@@ -1,7 +1,4 @@
-import {
-  formatDateTimeForCalendar,
-  generateICSContent,
-} from "@/lib/calendar";
+import { formatDateTimeForCalendar, generateICSContent } from "@/lib/calendar";
 
 describe("formatDateTimeForCalendar", () => {
   it("returns empty strings when date or time is missing", () => {
