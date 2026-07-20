@@ -691,6 +691,8 @@ const Map = ({
       <MapContainer
         center={center}
         zoom={13}
+        maxZoom={18}
+        preferCanvas={true}
         style={{
           width: "95%",
           height: "95%",
@@ -705,6 +707,10 @@ const Map = ({
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
               className="map-tiles-dark"
+              maxZoom={18}
+              maxNativeZoom={18}
+              keepBuffer={4}
+              updateWhenIdle={true}
             />
           </LayersControl.BaseLayer>
 
