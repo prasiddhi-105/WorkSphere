@@ -5,40 +5,100 @@
  * Development: Falls back to an in-memory sliding window automatically
  */
 
-const upstashLimiters = new Map<number, any>();
+/**
+ * Token Bucket Rate Limiting Lua Script for Upstash Redis.
+ *
+ * Uses a hash to store (tokens, lastRefill) and atomically refills tokens
+ * based on elapsed time. Handles concurrent burst traffic correctly because
+ * the Lua script executes atomically — no duplicate-member issue that the
+ * previous sliding-window ZADD approach had.
+ */
+export const TOKEN_BUCKET_LUA = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local window_seconds = tonumber(ARGV[3])
 
-function getUpstashRatelimit(limitPerMinute: number) {
+local state = redis.call('HMGET', key, 'tokens', 'lastRefill')
+local tokens = tonumber(state[1])
+local lastRefill = tonumber(state[2])
+
+if tokens == nil then
+    redis.call('HMSET', key, 'tokens', limit - 1, 'lastRefill', now)
+    redis.call('EXPIRE', key, window_seconds)
+    return 1
+end
+
+local elapsed_ms = math.max(0, now - lastRefill)
+local refill = math.floor(elapsed_ms / (window_seconds * 1000) * limit)
+tokens = math.min(limit, tokens + refill)
+
+if tokens >= 1 then
+    tokens = tokens - 1
+    redis.call('HMSET', key, 'tokens', tokens, 'lastRefill', now)
+    redis.call('EXPIRE', key, window_seconds)
+    return 1
+else
+    redis.call('EXPIRE', key, window_seconds)
+    return 0
+end
+`;
+
+let redisClient: any = null;
+
+function getRedisClient() {
   if (
     !process.env.UPSTASH_REDIS_REST_URL ||
     !process.env.UPSTASH_REDIS_REST_TOKEN
   ) {
     return null;
   }
+  if (redisClient) return redisClient;
 
   try {
-    // Dynamic require so the build doesn't fail if packages aren't present yet
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { Ratelimit } = require("@upstash/ratelimit");
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { Redis } = require("@upstash/redis");
-
-    const redis = new Redis({
+    redisClient = new Redis({
       url: process.env.UPSTASH_REDIS_REST_URL,
       token: process.env.UPSTASH_REDIS_REST_TOKEN,
     });
-
-    return new Ratelimit({
-      redis,
-      limiter: Ratelimit.slidingWindow(limitPerMinute, "1 m"),
-      analytics: true,
-      prefix: "worksphere:ratelimit",
-    }) as {
-      limit: (
-        identifier: string,
-      ) => Promise<{ success: boolean; remaining: number; reset: number }>;
-    };
+    return redisClient;
   } catch {
     return null;
+  }
+}
+
+async function upstashRateLimit(
+  identifier: string,
+  limit: number,
+): Promise<boolean> {
+  const redis = getRedisClient();
+  if (!redis) return memRateLimit(identifier, limit);
+
+  try {
+    const now = Date.now();
+    const windowSeconds = 60;
+    const key = `worksphere:ratelimit:${identifier}`;
+
+    const allowed = await redis.eval(
+      TOKEN_BUCKET_LUA,
+      [key],
+      [now, limit, windowSeconds],
+    );
+    const windowMs = 60_000;
+    const windowSeconds = Math.ceil(windowMs / 1000);
+    const windowMinute = Math.floor(Date.now() / windowMs);
+    const key = `worksphere:ratelimit:${identifier}:${windowMinute}`;
+
+    const tx = redis.multi();
+    tx.incr(key);
+    tx.expire(key, windowSeconds);
+    const result = await tx.exec();
+
+    const count = result[0] as number;
+    return count <= limit;
+  } catch {
+    return memRateLimit(identifier, limit);
   }
 }
 
@@ -58,7 +118,6 @@ interface RateLimitInfo {
 }
 const rateLimitInfoStore = new Map<string, RateLimitInfo>();
 
-// Run cleanup in the background instead of on the request path.
 const CLEANUP_INTERVAL_MS = 60_000;
 
 function cleanupExpiredEntries() {
@@ -77,7 +136,6 @@ function cleanupExpiredEntries() {
   }
 }
 
-// Start a single background cleanup task.
 const globalCleanup = globalThis as typeof globalThis & {
   __rateLimitCleanupTimer?: NodeJS.Timeout;
 };
@@ -138,17 +196,11 @@ export async function rateLimit(
   identifier: string,
   limit = 10,
 ): Promise<boolean> {
-  let rl = upstashLimiters.get(limit);
-  if (!rl) {
-    rl = getUpstashRatelimit(limit);
-    if (rl) {
-      upstashLimiters.set(limit, rl);
-    }
-  }
-
-  if (rl) {
-    const { success } = await rl.limit(identifier);
-    return success;
+  if (
+    process.env.UPSTASH_REDIS_REST_URL &&
+    process.env.UPSTASH_REDIS_REST_TOKEN
+  ) {
+    return upstashRateLimit(identifier, limit);
   }
 
   return memRateLimit(identifier, limit);
@@ -175,4 +227,17 @@ export function resetRateLimit(identifier?: string): void {
     memStore.clear();
     rateLimitInfoStore.clear();
   }
+}
+
+export function resetRedisScripts(): void {
+  redisClient = null;
+}
+
+export function microTimestampMember(
+  sec: number | string,
+  usec: number,
+  nonce: string,
+): string {
+  const padUsec = String(usec).padStart(6, "0");
+  return `${sec}${padUsec}:${nonce}`;
 }
