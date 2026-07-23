@@ -318,8 +318,22 @@ export class CrowdSimulationEngine {
 
     const { agentCount, exitPositions, wallSegments } = this.config;
 
-    // Agent buffers (ping-pong)
+    // Validate memory limits
     const agentSize = agentCount * AGENT_STRIDE;
+    const maxBindingSize =
+      this.device.limits?.maxStorageBufferBindingSize || 134217728;
+    const maxBufferSize = this.device.limits?.maxBufferSize || 268435456;
+
+    if (agentSize > maxBindingSize || agentSize > maxBufferSize) {
+      console.warn(
+        `[CrowdSim] Required buffer size ${agentSize} bytes exceeds WebGPU storage buffer limits (maxBindingSize: ${maxBindingSize})`,
+      );
+      throw new Error(
+        `WebGPU memory limit reached: requested ${agentSize} bytes exceeds limit ${maxBindingSize}`,
+      );
+    }
+
+    // Agent buffers (ping-pong)
     this.agentBufferA = this.device.createBuffer({
       size: agentSize,
       usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST,
@@ -412,53 +426,21 @@ export class CrowdSimulationEngine {
       size: AGENT_VERTICES.byteLength,
       usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
     });
-    this.device.queue.writeBuffer(this.agentVertexBuffer!, 0, AGENT_VERTICES as unknown as BufferSource);
+    this.device.queue.writeBuffer(
+      this.agentVertexBuffer!,
+      0,
+      AGENT_VERTICES as unknown as BufferSource,
+    );
 
     this.agentIndexBuffer = this.device.createBuffer({
       size: AGENT_INDICES.byteLength,
       usage: BufferUsage.INDEX | BufferUsage.COPY_DST,
     });
-    this.device.queue.writeBuffer(this.agentIndexBuffer!, 0, AGENT_INDICES as unknown as BufferSource);
-
-    // ── Density heatmap buffers ──
-    const gridCells = this.DENSITY_GRID_SIZE * this.DENSITY_GRID_SIZE;
-
-    this.densityBuffer = this.device.createBuffer({
-      size: gridCells * 4,
-      usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST,
-    });
-
-    this.densityUniformBuffer = this.device.createBuffer({
-      size: 32,
-      usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
-    });
-
-    this.heatmapUniformBuffer = this.device.createBuffer({
-      size: 16,
-      usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
-    });
-
-    const texUsage =
-      typeof GPUTextureUsage !== "undefined"
-        ? GPUTextureUsage
-        : { TEXTURE_BINDING: 0x0004, COPY_DST: 0x0002, COPY_SRC: 0x0001, RENDER_ATTACHMENT: 0x0010 };
-
-    this.densityTexture = this.device.createTexture({
-      size: [this.DENSITY_GRID_SIZE, this.DENSITY_GRID_SIZE],
-      format: "r32float",
-      usage: texUsage.TEXTURE_BINDING | texUsage.COPY_DST | texUsage.COPY_SRC,
-    })!;
-
-    this.heatmapTexture = this.device.createTexture({
-      size: [this.canvas.width, this.canvas.height],
-      format: navigator.gpu.getPreferredCanvasFormat(),
-      usage: texUsage.RENDER_ATTACHMENT | texUsage.TEXTURE_BINDING,
-    });
-
-    this.densitySampler = this.device.createSampler({
-      magFilter: "linear",
-      minFilter: "linear",
-    });
+    this.device.queue.writeBuffer(
+      this.agentIndexBuffer!,
+      0,
+      AGENT_INDICES as unknown as BufferSource,
+    );
   }
 
   private async createPipelines(format: GPUTextureFormat): Promise<void> {
