@@ -147,6 +147,14 @@ export function EnhancedChatbot({
   >({});
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
 
+  // Monotonic message ID counter — avoids React key collisions when
+  // multiple messages arrive within the same millisecond (Date.now() issue).
+  const msgIdCounter = useRef(0);
+  const nextMsgId = () => {
+    msgIdCounter.current += 1;
+    return `msg-${Date.now()}-${msgIdCounter.current}`;
+  };
+
   // Core state
   const [location, setLocation] = useState(userLocation);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -569,20 +577,21 @@ export function EnhancedChatbot({
   };
 
   // Rating
-  const handleSubmitRating = async (rating: {
+  const handleRatingSubmit = async (rating: {
     wifiQuality: number;
     hasOutlets: boolean;
     noiseLevel: "quiet" | "moderate" | "loud";
-    avgDecibels?: number;
-    peakDecibels?: number;
-    comment?: string;
-    hasErgonomic: boolean;
-    outletDensity: "every_table" | "some_tables" | "wall_seats" | "none";
+    hasErgonomic?: boolean;
+    outletDensity?: string;
     wifiSpeed?: number;
-    speedtestPhoto?: string;
     hasPhoneBooths?: boolean;
     hasNoMusic?: boolean;
     hasQuietZone?: boolean;
+    hasAncHeadsetRental?: boolean;
+    singleOriginBeans?: boolean;
+    specialtyEspresso?: boolean;
+    oatAlmondMilk?: boolean;
+    pourOverAvailable?: boolean;
     musicStyle?: string;
     petsAllowedIndoors?: boolean;
     patioOnly?: boolean;
@@ -590,10 +599,34 @@ export function EnhancedChatbot({
     dogFriendly?: boolean;
     catsAllowed?: boolean;
   }) => {
-    if (!ratingVenue || !isSignedIn) return;
+    const targetVenue = ratingVenue;
+    if (!targetVenue || !isSignedIn) return;
+    const previousMessages = [...messages];
     try {
+      // Optimistic UI update before server response finishes
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (!msg.venues) return msg;
+          return {
+            ...msg,
+            venues: msg.venues.map((v) =>
+              v.id === targetVenue.id
+                ? {
+                    ...v,
+                    score: rating.wifiQuality,
+                    rating: rating.wifiQuality,
+                    wifiQuality: rating.wifiQuality,
+                    hasOutlets: rating.hasOutlets,
+                    noiseLevel: rating.noiseLevel,
+                  }
+                : v,
+            ),
+          };
+        }),
+      );
+
       const token = await getToken();
-      await fetch(`/api/venues/${ratingVenue.id}/rate`, {
+      await fetch(`/api/venues/${targetVenue.id}/rate`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -602,21 +635,22 @@ export function EnhancedChatbot({
         body: JSON.stringify({
           ...rating,
           venue: {
-            name: ratingVenue.name,
-            lat: ratingVenue.lat,
-            lng: ratingVenue.lng,
-            category: ratingVenue.category,
-            address: ratingVenue.address,
+            name: targetVenue.name,
+            lat: targetVenue.lat,
+            lng: targetVenue.lng,
+            category: targetVenue.category,
+            address: targetVenue.address,
           },
         }),
       });
       trackVenueInteraction("rated", {
-        id: ratingVenue.id,
-        name: ratingVenue.name,
-        category: ratingVenue.category,
+        id: targetVenue.id,
+        name: targetVenue.name,
+        category: targetVenue.category,
       });
       setRatingVenue(null);
     } catch (e) {
+      setMessages(previousMessages);
       console.error("Failed to submit rating:", e);
       trackError(
         e instanceof Error ? e : new Error(String(e)),
@@ -624,6 +658,7 @@ export function EnhancedChatbot({
       );
     }
   };
+  const handleSubmitRating = handleRatingSubmit;
 
   // Directions
   const handleGetDirections = (venue: Venue) => {
@@ -730,16 +765,20 @@ export function EnhancedChatbot({
     }
 
     const newUserMessage: Message = {
-      id: Date.now().toString(),
+      id: nextMsgId(),
       role: "user",
       content: userMessage,
       name: user?.firstName || "Anonymous",
     };
 
+
     setMessages((prev) => {
       if (prev.some((m) => m.id === newUserMessage.id)) return prev;
       return [...prev, newUserMessage];
     });
+
+    setMessages((prev) => [...prev, newUserMessage]);
+
 
     if (socket && roomId) {
       sendSocketMessage(
@@ -795,6 +834,18 @@ export function EnhancedChatbot({
           },
         ];
       });
+
+      const assistantMessageId = nextMsgId();
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: assistantMessageId,
+          role: "assistant",
+          content: "",
+          isStreaming: true,
+        },
+      ]);
+
 
       setIsLoading(false);
 

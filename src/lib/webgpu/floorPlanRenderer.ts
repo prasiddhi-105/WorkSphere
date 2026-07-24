@@ -562,12 +562,21 @@ export class WebGPUFloorPlanRenderer {
       this.device = await adapter.requestDevice();
       this.isDeviceLost = false;
 
-      this.device.lost.then((info: { reason: string; message: string }) => {
+      this.device.addEventListener("uncapturederror", (event: any) => {
+        console.error("[WebGPU] Uncaptured error detected:", event.error);
+      });
+
+      this.device.lost.then(async (info: { reason: string; message: string }) => {
         console.warn(
           `[WebGPU] GPUDevice lost (${info.reason}): ${info.message}`,
         );
         this.isDeviceLost = true;
         this.cleanupGPUResources();
+        
+        if (info.reason !== "destroyed") {
+          console.info("[WebGPU] Attempting automatic device recovery...");
+          await this.reinitialize();
+        }
       });
 
       this.context = this.canvas.getContext(
@@ -659,13 +668,13 @@ export class WebGPUFloorPlanRenderer {
       size: mesh.vertices.byteLength,
       usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
     });
-    this.device.queue.writeBuffer(this.vertexBuffer, 0, mesh.vertices);
+    this.device.queue.writeBuffer(this.vertexBuffer!, 0, mesh.vertices as unknown as BufferSource);
 
     this.indexBuffer = this.device.createBuffer({
       size: mesh.indices.byteLength,
       usage: BufferUsage.INDEX | BufferUsage.COPY_DST,
     });
-    this.device.queue.writeBuffer(this.indexBuffer, 0, mesh.indices);
+    this.device.queue.writeBuffer(this.indexBuffer!, 0, mesh.indices as unknown as BufferSource);
   }
 
   render(): void {
