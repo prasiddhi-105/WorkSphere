@@ -5,6 +5,8 @@ import { useUser } from "@clerk/nextjs";
 import { Upload, Loader2, Image as ImageIcon } from "lucide-react";
 import Image from "next/image";
 
+const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB limit in bytes
+
 const HEIC_EXTENSIONS = [".heic", ".heif"];
 const isHeicFile = (file: File) =>
   HEIC_EXTENSIONS.some((ext) => file.name.toLowerCase().endsWith(ext)) ||
@@ -36,8 +38,12 @@ export function CustomAvatarUpload() {
     let file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      setError("Image must be smaller than 5MB.");
+    // 1. Check file size against 2MB limit before reading image stream or processing
+    if (file.size > MAX_FILE_SIZE) {
+      setError("Image size exceeds 2MB limit.");
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
       return;
     }
 
@@ -98,7 +104,7 @@ export function CustomAvatarUpload() {
             Profile Picture
           </h3>
           <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
-            Upload a custom avatar to personalize your profile.
+            Upload a custom avatar to personalize your profile. (Max 2MB)
           </p>
 
           <div className="flex items-center gap-4">
