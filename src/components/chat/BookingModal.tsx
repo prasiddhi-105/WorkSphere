@@ -20,13 +20,21 @@ import {
   CalendarPlus,
   Mail,
 } from "lucide-react";
-import { useState, useEffect, useRef } from "react";
+import {
+  useState,
+  useEffect,
+  useRef,
+  type MouseEvent,
+  type PointerEvent,
+} from "react";
 import confetti from "canvas-confetti";
 import { Venue } from "./ChatMessages";
 import { trackEvent } from "@/lib/analytics";
+import { ReceiptVerificationModal } from "@/components/receipt/ReceiptVerificationModal";
 
 import { getCalendarUrls, downloadICS } from "@/lib/calendar";
 import GuestsInput, { type GuestEntry } from "@/components/GuestsInput";
+import { shouldCloseFromBackdrop } from "@/lib/modal-interactions";
 
 interface Booking {
   id: string;
@@ -88,8 +96,29 @@ export function BookingModal({
   const [includeNotes, setIncludeNotes] = useState(false);
   const [showLogo, setShowLogo] = useState(true);
   const [dateFilter, setDateFilter] = useState("all");
+  const [verifyModalOpen, setVerifyModalOpen] = useState(false);
 
   const modalRef = useRef<HTMLDivElement>(null);
+  const pointerDownStartedOnBackdrop = useRef(false);
+
+  const handleBackdropPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    pointerDownStartedOnBackdrop.current = event.target === event.currentTarget;
+  };
+
+  const handleBackdropClick = (event: MouseEvent<HTMLDivElement>) => {
+    const clickEndedOnBackdrop = event.target === event.currentTarget;
+
+    if (
+      shouldCloseFromBackdrop(
+        pointerDownStartedOnBackdrop.current,
+        clickEndedOnBackdrop,
+      )
+    ) {
+      onClose();
+    }
+
+    pointerDownStartedOnBackdrop.current = false;
+  };
 
   // =========================================================================
   // CELEBRATORY CONFETTI SUCCESS TRIGGER OVERLAY
@@ -438,13 +467,18 @@ export function BookingModal({
   };
 
   return (
-    <div className="fixed inset-0 z-[20000] flex items-center justify-center p-4 bg-zinc-950/90 animate-in fade-in duration-300 backdrop-blur-sm">
+    <div
+      className="fixed inset-0 z-[20000] flex items-center justify-center p-4 bg-zinc-950/90 animate-in fade-in duration-300 backdrop-blur-sm"
+      onPointerDown={handleBackdropPointerDown}
+      onClick={handleBackdropClick}
+    >
       <div
         ref={modalRef}
         role="dialog"
         aria-modal="true"
         className="bg-white dark:bg-zinc-900 w-full max-w-2xl overflow-hidden rounded-[2.5rem] shadow-[0_20px_100px_rgba(0,0,0,0.9)] border border-zinc-200 dark:border-zinc-800 animate-in zoom-in-95 duration-300"
-        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
       >
         {/* Header */}
         <div className="p-8 border-b border-zinc-100 dark:border-zinc-800 flex items-center justify-between bg-zinc-50/50 dark:bg-zinc-800/30">
@@ -734,6 +768,8 @@ export function BookingModal({
                       min={getTodayString()}
                       className="w-full pl-12 pr-6 py-4 bg-zinc-50 dark:bg-zinc-800 border-2 border-zinc-100 dark:border-zinc-700 rounded-[1.25rem] text-sm font-bold focus:ring-4 focus:ring-[color-mix(in_srgb,var(--primary-accent),transparent_0.8)] focus:accent-border outline-none transition-all"
                       value={bookingDate}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => event.stopPropagation()}
                       onChange={(e) => setBookingDate(e.target.value)}
                     />
                   </div>
@@ -796,7 +832,9 @@ export function BookingModal({
                         min="2"
                         max="12"
                         value={recurringOccurrences}
-                        onChange={(e) => setRecurringOccurrences(parseInt(e.target.value) || 2)}
+                        onChange={(e) =>
+                          setRecurringOccurrences(parseInt(e.target.value) || 2)
+                        }
                         className="w-full px-4 py-3 bg-zinc-50 dark:bg-zinc-800 border-2 border-zinc-100 dark:border-zinc-700 rounded-[1.25rem] text-sm font-bold focus:ring-4 focus:ring-[color-mix(in_srgb,var(--primary-accent),transparent_0.8)] focus:accent-border outline-none transition-all"
                       />
                     </div>
@@ -1106,6 +1144,15 @@ export function BookingModal({
                   Cancel
                 </button>
                 <button
+                  onClick={() => {
+                    confirmDownloadSingle();
+                    setVerifyModalOpen(true);
+                  }}
+                  className="py-3 px-4 border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 rounded-xl text-xs font-black uppercase tracking-widest transition-colors"
+                >
+                  Verify
+                </button>
+                <button
                   onClick={confirmDownloadSingle}
                   className="flex-1 py-3 bg-[var(--primary-accent)] hover:opacity-90 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-colors"
                 >
@@ -1116,6 +1163,10 @@ export function BookingModal({
           </div>
         )}
       </div>
+      <ReceiptVerificationModal
+        open={verifyModalOpen}
+        onClose={() => setVerifyModalOpen(false)}
+      />
     </div>
   );
 }
